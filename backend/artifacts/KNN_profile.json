@@ -1,0 +1,9 @@
+{
+  "model_name": "KNN",
+  "train_time_s": null,
+  "inference_time_total_s": 0.296683,
+  "inference_time_per_sample_ms": 0.1472,
+  "ram_train_delta_mb": null,
+  "ram_inference_peak_mb": 292.33,
+  "cpu_inference_percent": null
+}
