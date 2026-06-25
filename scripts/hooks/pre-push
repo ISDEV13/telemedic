@@ -8,7 +8,7 @@ echo ""
 
 cd backend || exit 1
 
-pytest tests/test_fonctionnel.py -v
+.backvenv/Scripts/pytest tests/test_fonctionnel.py -v
 
 if [ $? -ne 0 ]; then
   echo ""
