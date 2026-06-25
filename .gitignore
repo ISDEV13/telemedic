@@ -7,3 +7,5 @@ __pycache__
 backend/models
 backend/mlflow.db
 backend/mlruns
+backend/predictions_history.csv
+
