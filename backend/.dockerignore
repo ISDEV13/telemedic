@@ -1,0 +1,8 @@
+﻿.backvenv
+mlruns
+models
+__pycache__
+*.pyc
+*.ipynb
+artifacts
+test_mlflow.py

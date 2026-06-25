@@ -4,18 +4,25 @@ from sklearn.preprocessing import MinMaxScaler, OneHotEncoder
 from sklearn.compose import ColumnTransformer
 from sklearn.model_selection import train_test_split
 import pandas as pd
+import numpy as np  # utilisé par apply_business_rules pour remplacer les valeurs aberrantes par NaN
 import os
 
 
 # Tranches d'âge médicalement significatives (généralisation d'attribut)
 _AGE_BINS   = [0, 17, 40, 64, float("inf")]
 _AGE_LABELS = ["enfant", "adulte_jeune", "adulte", "senior"]
-_CAT_COL = ["sexe", "zone_vie",'source','description']  
+_CAT_COL = ["sexe", "zone_vie",'source']  
+_TXT_COL = ['description_symptomes']
 _NUM_COL = ['age', 'freq_cardiaque', 'frequence_cardiaque', 'tension_sys', 'temp', 'sat_oxygene','antecedents','duree_symptomes']  
 _TRASH = ['patient_id']  # Variables à supprimer (ex: ID patient)
 _TARGET = ["niveau_urgence"]  # Variable cible pour la prédiction
 
 _DATA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "dataset_telemed.csv")
+
+df = pd.read_csv(_DATA_PATH)
+
+# Voir les valeurs typiques pour chaque classe
+print(df.groupby("niveau_urgence")[["freq_cardiaque", "temp", "sat_oxygene", "tension_sys"]].mean())
 
 # Bornes des valeurs physiquement impossibles (pas des seuils cliniques)
 _BORNES_IMPOSSIBLES = {
@@ -30,38 +37,54 @@ _BORNES_IMPOSSIBLES = {
 
 
 def apply_business_rules(df):
-    """
-    Supprime les valeurs physiquement impossibles par clipping aux bornes absolues.
-    Ne touche pas aux valeurs médicalement extrêmes mais possibles.
-
-    Returns:
-        DataFrame nettoyé
-    """
     df = df.copy()
     rapport = []
 
+    # =========================
+    # 1. Suppression des doublons
+    # =========================
+    n_avant = len(df)
+    df = df.drop_duplicates()
+    n_apres = len(df)
+    n_supprime = n_avant - n_apres
+
+    if n_supprime > 0:
+        rapport.append(
+            f"Doublons supprimés : {n_supprime} ligne(s) ({n_avant} → {n_apres})"
+        )
+        
     for col, (min_val, max_val) in _BORNES_IMPOSSIBLES.items():
+
         if col not in df.columns:
             continue
-        masque = pd.Series(False, index=df.index)
+
+        masque_col = pd.Series(False, index=df.index)
+
         if min_val is not None:
-            masque |= df[col] < min_val
+            masque_col |= df[col] < min_val
+
         if max_val is not None:
-            masque |= df[col] > max_val
-        n = masque.sum()
-        if n > 0:
-            df[col] = df[col].clip(lower=min_val, upper=max_val)
-            borne_str = f"[{min_val}, {max_val if max_val is not None else '∞'}]"
-            rapport.append(f"{col} : {n} valeur(s) impossible(s) hors {borne_str} → clippées")
+            masque_col |= df[col] > max_val
+
+        n_anomalies = masque_col.sum()
+
+        if n_anomalies > 0:
+            df.loc[masque_col, col] = np.nan
+            rapport.append(
+                f"{col} : {n_anomalies} valeur(s) impossible(s) → remplacées par NaN"
+            )
+
 
     print("=" * 55)
-    print("     RAPPORT RÈGLES MÉTIERS")
+    print("RAPPORT RÈGLES MÉTIERS")
     print("=" * 55)
+
     if rapport:
-        for ligne in rapport:
-            print(f"  • {ligne}")
+        for r in rapport:
+            print(" •", r)
     else:
-        print("  Aucune valeur impossible détectée.")
+        print("Aucune anomalie détectée.")
+
     print("=" * 55)
 
     return df

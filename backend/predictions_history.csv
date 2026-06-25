@@ -1,0 +1,59 @@
+﻿timestamp,age,freq_cardiaque,tension_sys,temp,sat_oxygene,antecedents,duree_symptomes,source,description_symptomes,prediction,label,proba_pas_urgent,proba_urgent,proba_tres_urgent
+2026-06-25T09:50:41,45.0,80.0,120.0,35.0,98.0,0,2.0,appel,J'ai trés froid et chaud en meme temps,1,Urgent,0.61,0.27,0.12
+2026-06-25T09:51:06,45.0,80.0,120.0,34.0,98.0,0,2.0,appel,J'ai trés froid et chaud en meme temps,1,Urgent,0.61,0.27,0.12
+2026-06-25T09:51:14,45.0,80.0,120.0,32.0,98.0,0,2.0,appel,J'ai trés froid et chaud en meme temps,1,Urgent,0.61,0.27,0.12
+2026-06-25T09:51:42,45.0,120.0,125.0,32.0,70.0,1,2.0,appel,J'ai trés froid et chaud en meme temps,2,Très urgent,0.085,0.285,0.63
+2026-06-25T09:58:59,45.0,120.0,125.0,32.0,70.0,1,2.0,appel,J'ai trés froid et chaud en meme temps,2,Très urgent,0.085,0.285,0.63
+2026-06-25T10:00:54,45.0,80.0,120.0,30.0,98.0,0,2.0,appel,J'ai chaud et froid en même temps,1,Urgent,0.61,0.27,0.12
+2026-06-25T10:01:49,45.0,80.0,120.0,30.0,98.0,0,2.0,appel,"j'ai extrèmemement froid et des vertiges et tremblements, spasme",1,Urgent,0.59,0.3,0.11
+2026-06-25T10:02:16,45.0,80.0,120.0,40.0,98.0,0,2.0,appel,"j'ai extrèmemement froid et des vertiges et tremblements, spasme",2,Très urgent,0.17,0.45,0.38
+2026-06-25T10:02:26,45.0,80.0,120.0,39.0,98.0,0,2.0,appel,"j'ai extrèmemement froid et des vertiges et tremblements, spasme",2,Très urgent,0.205,0.57,0.225
+2026-06-25T10:04:12,45.0,61.0,120.0,31.0,98.0,0,2.0,appel,Raideur musculaire,1,Urgent,0.655,0.315,0.03
+2026-06-25T10:04:43,45.0,61.0,120.0,30.0,98.0,0,2.0,appel,"Raideur musculaire, difficulté a parler",1,Urgent,0.655,0.315,0.03
+2026-06-25T11:29:38,45.0,80.0,120.0,30.0,98.0,0,2.0,appel,Raideur musculaire,0,Pas urgent,1.0,0.0,0.0
+2026-06-25T11:29:56,45.0,20.0,120.0,30.0,98.0,0,2.0,appel,Raideur musculaire,0,Pas urgent,1.0,0.0,0.0
+2026-06-25T11:30:01,45.0,20.0,120.0,30.0,98.0,0,2.0,appel,Raideur musculaire,0,Pas urgent,1.0,0.0,0.0
+2026-06-25T11:30:07,45.0,20.0,120.0,30.0,100.0,0,2.0,appel,Raideur musculaire,0,Pas urgent,1.0,0.0,0.0
+2026-06-25T11:30:14,45.0,20.0,40.0,30.0,100.0,0,2.0,appel,Raideur musculaire,0,Pas urgent,1.0,0.0,0.0
+2026-06-25T11:30:20,45.0,20.0,40.0,30.0,100.0,0,2.0,appel,Raideur musculaire,1,Urgent,0.6,0.35,0.05
+2026-06-25T11:30:25,45.0,20.0,40.0,30.0,100.0,0,2.0,appel,Raideur musculaire,0,Pas urgent,0.9999,0.0001,0.0
+2026-06-25T11:41:09,45.0,20.0,40.0,30.0,100.0,0,2.0,appel,"patient inconscient, pouls très faible, hypothermie sévère, ne répond plus",0,Pas urgent,1.0,0.0,0.0
+2026-06-25T11:41:27,45.0,20.0,40.0,30.0,87.0,0,2.0,appel,"patient inconscient, pouls très faible, hypothermie sévère, ne répond plus",2,Très urgent,0.0124,0.069,0.9186
+2026-06-25T11:41:33,45.0,20.0,40.0,30.0,88.0,0,2.0,appel,"patient inconscient, pouls très faible, hypothermie sévère, ne répond plus",2,Très urgent,0.0323,0.4073,0.5604
+2026-06-25T11:48:01,45.0,120.0,155.0,38.0,88.0,0,2.0,appel,"patient inconscient, pouls très faible, hypothermie sévère, ne répond plus",2,Très urgent,0.0,0.554,0.446
+2026-06-25T11:48:08,45.0,120.0,155.0,38.0,88.0,0,2.0,appel,"patient inconscient, pouls très faible, hypothermie sévère, ne répond plus",2,Très urgent,0.025,0.225,0.75
+2026-06-25T11:48:11,45.0,120.0,155.0,38.0,88.0,0,2.0,appel,"patient inconscient, pouls très faible, hypothermie sévère, ne répond plus",2,Très urgent,0.0,0.0298,0.9702
+2026-06-25T11:50:53,45.0,188.0,155.0,38.0,88.0,0,2.0,appel,"patient inconscient, pouls très faible, hypothermie sévère, ne répond plus",2,Très urgent,0.0,0.0025,0.9975
+2026-06-25T12:15:17,45.0,80.0,120.0,32.0,98.0,0,2.0,appel,ok,1,Urgent,0.655,0.315,0.03
+2026-06-25T16:08:35,45.0,80.0,120.0,37.0,98.0,0,2.0,appel,maux de tête légers,1,Urgent,0.69,0.225,0.085
+2026-06-25T16:08:35,45.0,80.0,120.0,37.0,98.0,0,2.0,appel,maux de tête légers,1,Urgent,0.69,0.225,0.085
+2026-06-25T16:08:35,45.0,80.0,120.0,37.0,98.0,0,2.0,appel,maux de tête légers,1,Urgent,0.69,0.225,0.085
+2026-06-25T16:08:35,45.0,80.0,120.0,37.0,98.0,0,2.0,appel,maux de tête légers,1,Urgent,0.69,0.225,0.085
+2026-06-25T16:08:35,45.0,80.0,120.0,37.0,98.0,0,2.0,appel,maux de tête légers,1,Urgent,0.69,0.225,0.085
+2026-06-25T16:08:36,45.0,80.0,120.0,37.0,98.0,0,2.0,appel,maux de tête légers,1,Urgent,0.69,0.225,0.085
+2026-06-25T16:08:36,55.0,145.0,185.0,40.2,79.0,1,1.0,appel,"détresse respiratoire sévère, douleur thoracique, confusion",2,Très urgent,0.005,0.105,0.89
+2026-06-25T16:08:36,55.0,145.0,185.0,40.2,79.0,1,1.0,appel,"détresse respiratoire sévère, douleur thoracique, confusion",2,Très urgent,0.005,0.105,0.89
+2026-06-25T16:10:21,45.0,80.0,120.0,37.0,98.0,0,2.0,appel,maux de tête légers,1,Urgent,0.69,0.225,0.085
+2026-06-25T16:10:21,45.0,80.0,120.0,37.0,98.0,0,2.0,appel,maux de tête légers,1,Urgent,0.69,0.225,0.085
+2026-06-25T16:10:21,45.0,80.0,120.0,37.0,98.0,0,2.0,appel,maux de tête légers,1,Urgent,0.69,0.225,0.085
+2026-06-25T16:10:21,45.0,80.0,120.0,37.0,98.0,0,2.0,appel,maux de tête légers,1,Urgent,0.69,0.225,0.085
+2026-06-25T16:10:21,45.0,80.0,120.0,37.0,98.0,0,2.0,appel,maux de tête légers,1,Urgent,0.69,0.225,0.085
+2026-06-25T16:10:21,45.0,80.0,120.0,37.0,98.0,0,2.0,appel,maux de tête légers,1,Urgent,0.69,0.225,0.085
+2026-06-25T16:10:21,55.0,145.0,185.0,40.2,79.0,1,1.0,appel,"détresse respiratoire sévère, douleur thoracique, confusion",2,Très urgent,0.005,0.105,0.89
+2026-06-25T16:10:22,55.0,145.0,185.0,40.2,79.0,1,1.0,appel,"détresse respiratoire sévère, douleur thoracique, confusion",2,Très urgent,0.005,0.105,0.89
+2026-06-25T16:11:57,45.0,80.0,120.0,37.0,98.0,0,2.0,appel,maux de tête légers,1,Urgent,0.69,0.225,0.085
+2026-06-25T16:11:57,45.0,80.0,120.0,37.0,98.0,0,2.0,appel,maux de tête légers,1,Urgent,0.69,0.225,0.085
+2026-06-25T16:11:57,45.0,80.0,120.0,37.0,98.0,0,2.0,appel,maux de tête légers,1,Urgent,0.69,0.225,0.085
+2026-06-25T16:11:57,45.0,80.0,120.0,37.0,98.0,0,2.0,appel,maux de tête légers,1,Urgent,0.69,0.225,0.085
+2026-06-25T16:11:57,45.0,80.0,120.0,37.0,98.0,0,2.0,appel,maux de tête légers,1,Urgent,0.69,0.225,0.085
+2026-06-25T16:11:57,45.0,80.0,120.0,37.0,98.0,0,2.0,appel,maux de tête légers,1,Urgent,0.69,0.225,0.085
+2026-06-25T16:11:57,55.0,145.0,185.0,40.2,79.0,1,1.0,appel,"détresse respiratoire sévère, douleur thoracique, confusion",2,Très urgent,0.005,0.105,0.89
+2026-06-25T16:11:57,55.0,145.0,185.0,40.2,79.0,1,1.0,appel,"détresse respiratoire sévère, douleur thoracique, confusion",2,Très urgent,0.005,0.105,0.89
+2026-06-25T16:43:10,45.0,80.0,120.0,37.0,98.0,0,2.0,appel,maux de tête légers,1,Urgent,0.69,0.225,0.085
+2026-06-25T16:43:10,45.0,80.0,120.0,37.0,98.0,0,2.0,appel,maux de tête légers,1,Urgent,0.69,0.225,0.085
+2026-06-25T16:43:10,45.0,80.0,120.0,37.0,98.0,0,2.0,appel,maux de tête légers,1,Urgent,0.69,0.225,0.085
+2026-06-25T16:43:10,45.0,80.0,120.0,37.0,98.0,0,2.0,appel,maux de tête légers,1,Urgent,0.69,0.225,0.085
+2026-06-25T16:43:10,45.0,80.0,120.0,37.0,98.0,0,2.0,appel,maux de tête légers,1,Urgent,0.69,0.225,0.085
+2026-06-25T16:43:10,45.0,80.0,120.0,37.0,98.0,0,2.0,appel,maux de tête légers,1,Urgent,0.69,0.225,0.085
+2026-06-25T16:43:10,55.0,145.0,185.0,40.2,79.0,1,1.0,appel,"détresse respiratoire sévère, douleur thoracique, confusion",2,Très urgent,0.005,0.105,0.89
+2026-06-25T16:43:10,55.0,145.0,185.0,40.2,79.0,1,1.0,appel,"détresse respiratoire sévère, douleur thoracique, confusion",2,Très urgent,0.005,0.105,0.89

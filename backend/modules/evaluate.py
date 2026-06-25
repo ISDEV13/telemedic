@@ -1,143 +1,230 @@
-import json
+# =============================================================================
+# evaluate.py
+# Fonctions d'évaluation et de profiling des modèles ML du projet Telemedic.
+# Tous les artifacts PNG sont rangés dans artifacts/{nom_du_modele}/.
+# Les tableaux et graphiques comparatifs sont sauvegardés dans artifacts/.
+# =============================================================================
+
 import os
 import time
 import tracemalloc
-from datetime import datetime
-import numpy as np
-import pandas as pd
-from sklearn.metrics import (
-    accuracy_score, precision_score, recall_score, f1_score,
-    confusion_matrix, ConfusionMatrixDisplay,
-)
-import matplotlib.pyplot as plt
 
+import numpy as np
+import matplotlib
+matplotlib.use("Agg")  # backend non-interactif : génère les PNG sans GUI ni tkinter
+import matplotlib.pyplot as plt
+from sklearn.metrics import (
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    confusion_matrix,
+    ConfusionMatrixDisplay,
+)
+
+# psutil est optionnel : mesure la RAM et le CPU pendant le profiling
 try:
     import psutil
     _PSUTIL = True
 except ImportError:
     _PSUTIL = False
 
+# Chemin absolu vers le dossier artifacts/ (remonte d'un niveau depuis modules/)
 _ARTIFACTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "artifacts")
 os.makedirs(_ARTIFACTS_DIR, exist_ok=True)
 
-# ── Évaluation ────────────────────────────────────────────────────────────────
+import pandas as pd
+df = pd.read_csv("backend/dataset_telemed.csv")
 
-def evaluate_model(model_name, history, y_true, y_pred, labels=None):
+# Voir les valeurs typiques pour chaque classe
+print(df.groupby("niveau_urgence")[["freq_cardiaque", "temp", "sat_oxygene", "tension_sys"]].mean())
+
+def _get_model_dir(model_name, output_dir=None):
     """
-    Évalue un modèle de classification et retourne les métriques par classe.
+    Crée et retourne le sous-dossier {output_dir}/{model_name}/.
+    output_dir permet de cibler un dossier de configuration (avec/sans pénalisation).
+    Si output_dir est None, utilise _ARTIFACTS_DIR par défaut.
+    """
+    base = output_dir if output_dir else _ARTIFACTS_DIR
+    slug = model_name.replace(" ", "_")
+    model_dir = os.path.join(base, slug)
+    os.makedirs(model_dir, exist_ok=True)
+    return model_dir, slug
+
+
+def _penalisation_label(penalized):
+    """Retourne un texte court indiquant si la pénalisation est active."""
+    return "Pénalisation classe vitale : OUI" if penalized else "Pénalisation classe vitale : NON"
+
+
+def _weights_label(class_weights, label_names=None):
+    """
+    Construit une chaîne lisible des poids appliqués par classe.
+    Ex: 'Pas urgent=1 · Urgent=3 · Très urgent=10'
+    """
+    if not class_weights:
+        return "Aucune pondération"
+    parts = []
+    for cls, w in sorted(class_weights.items()):
+        name = label_names.get(cls, str(cls)) if label_names else str(cls)
+        parts.append(f"{name}={w}")
+    return "Poids : " + " · ".join(parts)
+
+
+# =============================================================================
+# ÉVALUATION
+# =============================================================================
+
+def evaluate_model(model_name, history, y_true, y_pred, labels=None, label_names=None, penalized=False, class_weights=None, output_dir=None):
+    """
+    Évalue un modèle de classification et sauvegarde les résultats en PNG.
 
     Args:
-        model_name : nom du modèle (str)
-        history    : objet History Keras issu de model.fit (peut être None)
-        y_true     : vraies étiquettes
-        y_pred     : étiquettes prédites (argmax déjà appliqué)
-        labels     : liste ordonnée des classes (ex: [0, 1, 2]) — détection auto si None
+        model_name    : nom du modèle (str), sert aussi de nom de sous-dossier
+        history       : objet History Keras issu de model.fit (None pour sklearn)
+        y_true        : vraies étiquettes (liste ou array)
+        y_pred        : étiquettes prédites par le modèle (argmax déjà appliqué)
+        labels        : liste ordonnée des classes, ex: [0, 1, 2]. Auto si None.
+        label_names   : dict {classe: nom lisible}, ex: {0: "Pas urgent", ...}
+        penalized     : True si le modèle a été entraîné avec pénalisation
+        class_weights : dict {classe: poids}, ex: {0: 1, 1: 3, 2: 10} — affiché dans les charts
 
     Returns:
-        dict {
-            "model_name"          : str,
-            "accuracy"            : float,
-            "f1_weighted"         : float,
-            "precision_weighted"  : float,
-            "recall_weighted"     : float,
-            "par_classe"          : { classe: { precision, recall, f1 } },
-            "epochs"              : int | None,
-            "val_accuracy_final"  : float | None,
-        }
+        dict contenant toutes les métriques + la matrice de confusion + le statut de pénalisation
     """
+
+    # ── 1. Détermination des classes présentes ────────────────────────────────
     classes = labels if labels is not None else sorted(set(y_true))
 
+    # Noms lisibles pour l'affichage — si label_names n'est pas fourni on utilise
+    # les valeurs brutes (0, 1, 2)
+    def to_display(cls):
+        if label_names:
+            return label_names.get(cls, str(cls))
+        return str(cls)
+
+    display_names = [to_display(cls) for cls in classes]
+
+    # ── 2. Métriques par classe ───────────────────────────────────────────────
+    # average=None → sklearn retourne un tableau, une valeur par classe
+    # zero_division=0 → évite une erreur si une classe n'a aucune prédiction
     precision_par_classe = precision_score(y_true, y_pred, average=None, labels=classes, zero_division=0)
     recall_par_classe    = recall_score   (y_true, y_pred, average=None, labels=classes, zero_division=0)
     f1_par_classe        = f1_score       (y_true, y_pred, average=None, labels=classes, zero_division=0)
 
+    # Support = nombre de vrais exemples de chaque classe dans y_true
+    support_par_classe = np.array([np.sum(np.array(y_true) == cls) for cls in classes])
+
+    # ── 3. Construction du dictionnaire de résultats ──────────────────────────
     result = {
-        "model_name":          model_name,
-        "accuracy":            accuracy_score(y_true, y_pred),
-        "f1_weighted":         f1_score       (y_true, y_pred, average="weighted", zero_division=0),
-        "precision_weighted":  precision_score(y_true, y_pred, average="weighted", zero_division=0),
-        "recall_weighted":     recall_score   (y_true, y_pred, average="weighted", zero_division=0),
+        "model_name":         model_name,
+        "penalized":          penalized,
+        "accuracy":           accuracy_score(y_true, y_pred),
+        "f1_weighted":        f1_score       (y_true, y_pred, average="weighted", zero_division=0),
+        "precision_weighted": precision_score(y_true, y_pred, average="weighted", zero_division=0),
+        "recall_weighted":    recall_score   (y_true, y_pred, average="weighted", zero_division=0),
         "par_classe": {
             cls: {
                 "precision": float(precision_par_classe[i]),
                 "recall":    float(recall_par_classe[i]),
                 "f1":        float(f1_par_classe[i]),
+                "support":   int(support_par_classe[i]),
             }
             for i, cls in enumerate(classes)
         },
+        # Ces deux valeurs ne sont disponibles que pour les réseaux de neurones (Keras)
         "epochs":             len(history.history.get("loss", [])) if history else None,
         "val_accuracy_final": history.history["val_accuracy"][-1]  if history and "val_accuracy" in history.history else None,
     }
 
-    # ── Affichage ─────────────────────────────────────────────────────────────
-    print("=" * 55)
-    print(f"  ÉVALUATION : {model_name}")
-    print("=" * 55)
-    print(f"  Accuracy          : {result['accuracy']:.4f}")
-    print(f"  F1 (weighted)     : {result['f1_weighted']:.4f}")
-    print(f"  Précision (wtd)   : {result['precision_weighted']:.4f}")
-    print(f"  Rappel    (wtd)   : {result['recall_weighted']:.4f}")
+    # ── 4. Affichage console ──────────────────────────────────────────────────
+    print("=" * 65)
+    print(f"  ÉVALUATION : {model_name}  |  {_penalisation_label(penalized)}")
+    print("=" * 65)
+    print(f"  Accuracy : {result['accuracy']:.4f}")
     if result["val_accuracy_final"] is not None:
         print(f"  Val accuracy (ep. {result['epochs']}) : {result['val_accuracy_final']:.4f}")
     print()
-    print(f"  {'Classe':<10} {'Précision':>10} {'Rappel':>10} {'F1':>10}")
-    print("  " + "-" * 42)
+    print(f"  {'Classe':<14} {'Précision':>10} {'Rappel':>10} {'F1':>10} {'Support':>10}")
+    print("  " + "-" * 56)
     for cls, m in result["par_classe"].items():
-        print(f"  {str(cls):<10} {m['precision']:>10.4f} {m['recall']:>10.4f} {m['f1']:>10.4f}")
-    print("=" * 55)
+        print(f"  {to_display(cls):<14} {m['precision']:>10.4f} {m['recall']:>10.4f} {m['f1']:>10.4f} {m['support']:>10}")
+    print("=" * 65)
 
-    # ── Sauvegarde artifacts ───────────────────────────────────────────────────
-    slug = model_name.replace(" ", "_")
+    # ── 5. Dossier de destination pour ce modèle ──────────────────────────────
+    # output_dir permet de ranger les artifacts dans avec_penalisation/ ou sans_penalisation/
+    model_dir, slug = _get_model_dir(model_name, output_dir)
 
-    # JSON des métriques
-    json_path = os.path.join(_ARTIFACTS_DIR, f"{slug}_metrics.json")
-    with open(json_path, "w", encoding="utf-8") as f:
-        json.dump(result, f, indent=2, ensure_ascii=False)
+    # ── 6. Matrice de confusion normalisée (PNG) ──────────────────────────────
+    # normalize='true' → chaque cellule est un taux (0.0 à 1.0) par classe réelle
+    # Plus lisible que les effectifs bruts quand les classes sont déséquilibrées
+    cm = confusion_matrix(y_true, y_pred, labels=classes, normalize="true")
 
-    # Matrice de confusion
-    cm = confusion_matrix(y_true, y_pred, labels=classes)
-    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=classes)
-    fig, ax = plt.subplots(figsize=(6, 5))
-    disp.plot(ax=ax, colorbar=False, cmap="Blues")
+    # On stocke la matrice normalisée dans le résultat pour benchmark_confusion
+    result["confusion_matrix"] = cm.tolist()
+
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=display_names)
+    fig, ax = plt.subplots(figsize=(6, 5.5))
+    disp.plot(ax=ax, colorbar=False, cmap="Blues", values_format=".2f")
     ax.set_title(f"Matrice de confusion — {model_name}")
+    # Sous-titre avec statut de pénalisation + poids par classe si disponibles
+    pen_line = _penalisation_label(penalized)
+    if penalized and class_weights:
+        pen_line += f"\n{_weights_label(class_weights, label_names)}"
+    ax.set_xlabel(ax.get_xlabel() + f"\n{pen_line}", fontsize=9)
+    plt.setp(ax.get_xticklabels(), rotation=30, ha="right", fontsize=9)
     plt.tight_layout()
-    plt.savefig(os.path.join(_ARTIFACTS_DIR, f"{slug}_confusion_matrix.png"), dpi=150)
+    plt.savefig(os.path.join(model_dir, f"{slug}_confusion_matrix.png"), dpi=150)
     plt.close(fig)
 
-    # Tableau des métriques par classe
-    col_labels = ["Précision", "Rappel", "F1"]
-    row_labels  = [f"Classe {cls}" for cls in classes]
-    cell_vals   = [
-        [f"{m['precision']:.4f}", f"{m['recall']:.4f}", f"{m['f1']:.4f}"]
+    # ── 7. Tableau des métriques par classe (PNG) ─────────────────────────────
+    col_labels_tbl = ["Précision", "Rappel", "F1", "Support"]
+    row_labels_tbl = display_names.copy()
+    cell_vals = [
+        [
+            f"{m['precision']:.4f}",
+            f"{m['recall']:.4f}",
+            f"{m['f1']:.4f}",
+            str(m["support"]),
+        ]
         for m in result["par_classe"].values()
     ]
-    # Ligne de synthèse globale
-    row_labels.append("Global (wtd)")
+
+    # Ligne de synthèse globale en bas du tableau
+    row_labels_tbl.append("Global (wtd)")
     cell_vals.append([
         f"{result['precision_weighted']:.4f}",
         f"{result['recall_weighted']:.4f}",
         f"{result['f1_weighted']:.4f}",
+        str(len(y_true)),
     ])
 
-    fig, ax = plt.subplots(figsize=(7, 0.6 * (len(row_labels) + 2)))
+    fig, ax = plt.subplots(figsize=(8, 0.6 * (len(row_labels_tbl) + 2)))
     ax.axis("off")
     tbl = ax.table(
         cellText=cell_vals,
-        rowLabels=row_labels,
-        colLabels=col_labels,
+        rowLabels=row_labels_tbl,
+        colLabels=col_labels_tbl,
         cellLoc="center",
         loc="center",
     )
     tbl.auto_set_font_size(False)
     tbl.set_fontsize(11)
     tbl.scale(1, 1.6)
-    ax.set_title(f"Métriques — {model_name}  (accuracy={result['accuracy']:.4f})",
-                 fontsize=12, pad=12)
+    # Le titre contient le statut de pénalisation + les poids par classe si disponibles
+    pen_line = _penalisation_label(penalized)
+    if penalized and class_weights:
+        pen_line += f"  |  {_weights_label(class_weights, label_names)}"
+    ax.set_title(
+        f"Métriques — {model_name}  (accuracy={result['accuracy']:.4f})\n{pen_line}",
+        fontsize=10,
+        pad=14,
+    )
     plt.tight_layout()
-    plt.savefig(os.path.join(_ARTIFACTS_DIR, f"{slug}_metrics_table.png"), dpi=150)
+    plt.savefig(os.path.join(model_dir, f"{slug}_metrics_table.png"), dpi=150)
     plt.close(fig)
 
-    # Courbe de loss (uniquement si history Keras fourni)
+    # ── 8. Courbe de loss — uniquement pour les réseaux de neurones ───────────
     if history is not None:
         hist = history.history
         fig, ax = plt.subplots(figsize=(8, 4))
@@ -149,69 +236,68 @@ def evaluate_model(model_name, history, y_true, y_pred, labels=None):
         ax.set_title(f"Courbe de loss — {model_name}")
         ax.legend()
         plt.tight_layout()
-        plt.savefig(os.path.join(_ARTIFACTS_DIR, f"{slug}_loss_curve.png"), dpi=150)
+        plt.savefig(os.path.join(model_dir, f"{slug}_loss_curve.png"), dpi=150)
         plt.close(fig)
 
     return result
 
 
-# ── Profiling ─────────────────────────────────────────────────────────────────
+# =============================================================================
+# PROFILING
+# =============================================================================
 
 def profile_model(model_name, predict_fn, X_test, train_fn=None, n_repeat=10):
     """
-    Mesure le temps d'inférence, le temps d'entraînement et les ressources consommées.
+    Mesure les performances techniques d'un modèle : temps et mémoire.
 
     Args:
         model_name : nom du modèle (str)
-        predict_fn : callable(X) → prédictions
-        X_test     : données de test pour l'inférence
-        train_fn   : callable sans argument wrappant model.fit — None si déjà entraîné
-        n_repeat   : nombre de passages pour moyenner l'inférence (défaut : 10)
+        predict_fn : fonction callable(X) qui retourne les prédictions
+        X_test     : données de test utilisées pour mesurer l'inférence
+        train_fn   : fonction callable() wrappant model.fit — None si déjà entraîné
+        n_repeat   : nombre de passes d'inférence pour avoir une mesure stable
 
     Returns:
-        dict {
-            "model_name"                  : str,
-            "train_time_s"                : float | None,
-            "inference_time_total_s"      : float,
-            "inference_time_per_sample_ms": float,
-            "ram_train_delta_mb"          : float | None,
-            "ram_inference_delta_mb"      : float,
-            "cpu_inference_percent"       : float | None,
-        }
+        dict avec les métriques de performance technique
     """
     process = psutil.Process() if _PSUTIL else None
     n_samples = X_test.shape[0]
 
-    # ── Temps + RAM entraînement ───────────────────────────────────────────────
-    train_time_s = None
+    # ── 1. Temps et RAM pendant l'entraînement ────────────────────────────────
+    # Mesuré uniquement si train_fn est fourni
+    train_time_s       = None
     ram_train_delta_mb = None
+
     if train_fn is not None:
-        ram_before = process.memory_info().rss if process else 0
-        t0 = time.perf_counter()
+        ram_before         = process.memory_info().rss if process else 0
+        t0                 = time.perf_counter()
         train_fn()
-        train_time_s = time.perf_counter() - t0
+        train_time_s       = time.perf_counter() - t0
         ram_train_delta_mb = (process.memory_info().rss - ram_before) / 1024 ** 2 if process else None
 
-    # ── Temps + RAM inférence (médiane sur n_repeat passages) ─────────────────
+    # ── 2. Temps d'inférence (médiane sur n_repeat passes) ────────────────────
+    # La médiane est plus robuste que la moyenne face aux pics ponctuels
     durations = []
     for _ in range(n_repeat):
         t0 = time.perf_counter()
         predict_fn(X_test)
         durations.append(time.perf_counter() - t0)
 
-    ram_before = process.memory_info().rss if process else 0
+    inference_time_total_s = float(np.median(durations))
+
+    # ── 3. RAM consommée au pic pendant l'inférence ───────────────────────────
+    # tracemalloc trace les allocations Python — peak = valeur maximale atteinte
     tracemalloc.start()
     predict_fn(X_test)
     _, peak = tracemalloc.get_traced_memory()
     tracemalloc.stop()
     ram_inference_delta_mb = peak / 1024 ** 2
 
-    inference_time_total_s = float(np.median(durations))
-
-    # ── CPU pendant l'inférence ───────────────────────────────────────────────
+    # ── 4. CPU pendant l'inférence ────────────────────────────────────────────
+    # Premier appel pour reset le compteur, second appel après une inférence
     cpu_inference_percent = None
     if process:
-        process.cpu_percent(interval=None)          # reset du compteur
+        process.cpu_percent(interval=None)
         predict_fn(X_test)
         cpu_inference_percent = process.cpu_percent(interval=None)
 
@@ -225,149 +311,276 @@ def profile_model(model_name, predict_fn, X_test, train_fn=None, n_repeat=10):
         "cpu_inference_percent":        round(cpu_inference_percent, 1) if cpu_inference_percent is not None else None,
     }
 
+    # ── 5. Affichage console ──────────────────────────────────────────────────
     print("=" * 55)
     print(f"  PROFILING : {model_name}")
     print("=" * 55)
     if result["train_time_s"] is not None:
-        print(f"  Entraînement          : {result['train_time_s']:.4f} s")
+        print(f"  Entraînement           : {result['train_time_s']:.4f} s")
         if result["ram_train_delta_mb"] is not None:
-            print(f"  RAM entraînement Δ    : {result['ram_train_delta_mb']:.2f} MB")
-    print(f"  Inférence totale      : {result['inference_time_total_s']:.6f} s  (médiane {n_repeat} runs)")
+            print(f"  RAM entraînement Δ     : {result['ram_train_delta_mb']:.2f} MB")
+    print(f"  Inférence totale       : {result['inference_time_total_s']:.6f} s  (médiane {n_repeat} runs)")
     print(f"  Inférence / échantillon: {result['inference_time_per_sample_ms']:.4f} ms")
-    print(f"  RAM inférence (peak)  : {result['ram_inference_peak_mb']:.2f} MB")
+    print(f"  RAM inférence (peak)   : {result['ram_inference_peak_mb']:.2f} MB")
     if result["cpu_inference_percent"] is not None:
-        print(f"  CPU inférence         : {result['cpu_inference_percent']:.1f} %")
+        print(f"  CPU inférence          : {result['cpu_inference_percent']:.1f} %")
     print("=" * 55)
-
-    slug = model_name.replace(" ", "_")
-    json_path = os.path.join(_ARTIFACTS_DIR, f"{slug}_profile.json")
-    with open(json_path, "w", encoding="utf-8") as f:
-        json.dump(result, f, indent=2)
 
     return result
 
 
-# ── Benchmark ─────────────────────────────────────────────────────────────────
+# =============================================================================
+# BENCHMARKS COMPARATIFS
+# =============================================================================
 
-def benchmark_models(results, profiles=None, sort_by="f1_weighted"):
+def benchmark_models(results, label_names=None, output_dir=None):
     """
-    Compare plusieurs modèles à partir des dicts retournés par evaluate_model.
-    Intègre optionnellement les données de profile_model.
-
-    Args:
-        results  : liste de dicts (sorties de evaluate_model)
-        profiles : liste de dicts (sorties de profile_model) — optionnel
-        sort_by  : colonne de tri du classement (défaut : f1_weighted)
-
-    Returns:
-        DataFrame classé par sort_by décroissant
+    Génère un tableau PNG comparant les métriques de tous les modèles côte à côte.
+    Chaque ligne = un modèle. Colonnes = précision / rappel / F1 par classe + accuracy + pénalisation.
+    Sauvegardé dans output_dir/benchmark_metrics.png (ou artifacts/ par défaut).
     """
-    # Index des profils par nom de modèle pour jointure rapide
-    profiles_by_name = {p["model_name"]: p for p in profiles} if profiles else {}
+    if not results:
+        return
 
-    rows = []
+    classes = list(results[0]["par_classe"].keys())
+
+    def display(cls):
+        if label_names:
+            return label_names.get(cls, str(cls))
+        return str(cls)
+
+    # ── En-têtes : une colonne P/R/F1 par classe + Accuracy + Pénalisé ────────
+    col_labels = ["Modèle"]
+    for cls in classes:
+        name = display(cls)
+        col_labels += [f"P\n{name}", f"R\n{name}", f"F1\n{name}"]
+    col_labels += ["Accuracy", "Pénalisé"]
+
+    # ── Lignes : une par modèle ────────────────────────────────────────────────
+    cell_vals = []
     for r in results:
-        row = {
-            "model":              r["model_name"],
-            "accuracy":           r["accuracy"],
-            "f1_weighted":        r["f1_weighted"],
-            "precision_weighted": r["precision_weighted"],
-            "recall_weighted":    r["recall_weighted"],
-        }
-        for cls, m in r["par_classe"].items():
-            row[f"f1_classe_{cls}"]        = m["f1"]
-            row[f"precision_classe_{cls}"] = m["precision"]
-            row[f"recall_classe_{cls}"]    = m["recall"]
+        row = [r["model_name"]]
+        for cls in classes:
+            m = r["par_classe"][cls]
+            row += [f"{m['precision']:.3f}", f"{m['recall']:.3f}", f"{m['f1']:.3f}"]
+        row.append(f"{r['accuracy']:.3f}")
+        row.append("Oui" if r.get("penalized") else "Non")
+        cell_vals.append(row)
 
-        # Fusion des données de profiling si disponibles
-        p = profiles_by_name.get(r["model_name"])
-        if p:
-            row["train_time_s"]                 = p.get("train_time_s")
-            row["inference_time_per_sample_ms"] = p.get("inference_time_per_sample_ms")
-            row["ram_inference_peak_mb"]        = p.get("ram_inference_peak_mb")
-            row["cpu_inference_percent"]        = p.get("cpu_inference_percent")
+    n_cols = len(col_labels)
+    n_rows = len(cell_vals)
 
-        rows.append(row)
+    fig, ax = plt.subplots(figsize=(2.0 * n_cols, 0.9 * (n_rows + 2)))
+    ax.axis("off")
 
-    df = pd.DataFrame(rows).sort_values(sort_by, ascending=False).reset_index(drop=True)
-    df.index += 1
-
-    # ── Affichage ─────────────────────────────────────────────────────────────
-    global_cols = ["model", "accuracy", "f1_weighted", "precision_weighted", "recall_weighted"]
-    print("=" * 70)
-    print("  BENCHMARK — MÉTRIQUES GLOBALES")
-    print("=" * 70)
-    print(df[global_cols].to_string())
-    print()
-
-    f1_class_cols = ["model"] + [c for c in df.columns if c.startswith("f1_classe_")]
-    print("  BENCHMARK — F1 PAR CLASSE")
-    print("=" * 70)
-    print(df[f1_class_cols].to_string())
-
-    perf_cols = [c for c in ["model", "train_time_s", "inference_time_per_sample_ms",
-                              "ram_inference_peak_mb", "cpu_inference_percent"] if c in df.columns]
-    if len(perf_cols) > 1:
-        print()
-        print("  BENCHMARK — RESSOURCES")
-        print("=" * 70)
-        print(df[perf_cols].to_string())
-    print("=" * 70)
-
-    # ── Sauvegarde artifacts ───────────────────────────────────────────────────
-    df.to_csv(os.path.join(_ARTIFACTS_DIR, "benchmark_summary.csv"), index_label="rank")
-
-    x = np.arange(len(df))
-
-    # Graphe métriques globales
-    metrics_globales = ["accuracy", "f1_weighted", "precision_weighted", "recall_weighted"]
-    width = 0.2
-    fig, ax = plt.subplots(figsize=(max(8, len(df) * 2), 5))
-    for i, metric in enumerate(metrics_globales):
-        ax.bar(x + i * width, df[metric], width, label=metric)
-    ax.set_xticks(x + width * 1.5)
-    ax.set_xticklabels(df["model"], rotation=15, ha="right")
-    ax.set_ylim(0, 1.05)
-    ax.set_ylabel("Score")
-    ax.set_title("Benchmark — métriques globales")
-    ax.legend(loc="lower right")
+    tbl = ax.table(
+        cellText=cell_vals,
+        colLabels=col_labels,
+        cellLoc="center",
+        loc="center",
+    )
+    tbl.auto_set_font_size(False)
+    tbl.set_fontsize(9)
+    tbl.scale(1, 2.2)
+    ax.set_title("Comparaison des modèles — Métriques par classe", fontsize=13, pad=15)
     plt.tight_layout()
-    plt.savefig(os.path.join(_ARTIFACTS_DIR, "benchmark_global.png"), dpi=150)
+    base = output_dir if output_dir else _ARTIFACTS_DIR
+    plt.savefig(os.path.join(base, "benchmark_metrics.png"), dpi=150)
     plt.close(fig)
+    print(f"  → benchmark_metrics.png sauvegardé dans {base}")
 
-    # Graphe F1 par classe
-    f1_cols = [c for c in df.columns if c.startswith("f1_classe_")]
-    width = 0.8 / len(f1_cols) if f1_cols else 0.2
-    fig, ax = plt.subplots(figsize=(max(8, len(df) * 2), 5))
-    for i, col in enumerate(f1_cols):
-        ax.bar(x + i * width, df[col], width, label=col.replace("f1_classe_", "classe "))
-    ax.set_xticks(x + width * (len(f1_cols) - 1) / 2)
-    ax.set_xticklabels(df["model"], rotation=15, ha="right")
-    ax.set_ylim(0, 1.05)
-    ax.set_ylabel("F1-score")
-    ax.set_title("Benchmark — F1 par classe")
-    ax.legend(loc="lower right")
+
+def benchmark_metrics_chart(results, label_names=None, output_dir=None):
+    """
+    Génère un PNG avec 4 sous-graphiques comparant tous les modèles :
+      - F1, Recall, Précision par classe (barres groupées par modèle)
+      - Accuracy globale (une barre par modèle)
+    Les modèles pénalisés sont marqués ★ et leurs barres sont hachurées //.
+    Sauvegardé dans output_dir/benchmark_metriques.png (ou artifacts/ par défaut).
+    """
+    if not results:
+        return
+
+    classes   = list(results[0]["par_classe"].keys())
+    n_classes = len(classes)
+    n_models  = len(results)
+
+    def display(cls):
+        if label_names:
+            return label_names.get(cls, str(cls))
+        return str(cls)
+
+    display_names = [display(cls) for cls in classes]
+
+    # Nom du modèle sur l'axe X — ★ si pénalisation active
+    model_labels = [
+        r["model_name"] + (" ★" if r.get("penalized") else "")
+        for r in results
+    ]
+
+    colors    = ["#4C72B0", "#DD8452", "#55A868"]
+    bar_width = 0.2
+    x         = np.arange(n_models)
+
+    fig, axes = plt.subplots(2, 2, figsize=(max(14, 3 * n_models), 11))
+    axes = axes.flatten()  # on aplatit pour itérer avec un index simple
+
+    # ── 3 premiers sous-graphiques : F1 / Recall / Précision par classe ───────
+    # Chaque sous-graphique = barres groupées (un groupe par modèle, une barre par classe)
+    metrics_config = [
+        ("f1",        "F1-score par classe"),
+        ("recall",    "Recall par classe"),
+        ("precision", "Précision par classe"),
+    ]
+
+    for ax_idx, (metric_key, title) in enumerate(metrics_config):
+        ax = axes[ax_idx]
+
+        for i, (cls, color, dname) in enumerate(zip(classes, colors, display_names)):
+            vals      = [r["par_classe"][cls][metric_key] for r in results]
+            positions = x + i * bar_width - (n_classes - 1) * bar_width / 2
+
+            # On dessine barre par barre pour appliquer le hachage individuellement
+            for j, (pos, val, r) in enumerate(zip(positions, vals, results)):
+                hatch = "//" if r.get("penalized") else ""
+                ax.bar(
+                    pos, val,
+                    width=bar_width,
+                    color=color,
+                    hatch=hatch,
+                    edgecolor="black",
+                    linewidth=0.5,
+                    label=dname if j == 0 else "",  # légende affichée une seule fois
+                )
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(model_labels, fontsize=9)
+        ax.set_ylim(0, 1.15)
+        ax.set_title(title, fontsize=11)
+        ax.legend(title="Classe", fontsize=8, loc="lower right")
+        # Ligne de référence à 0.8 pour repérer visuellement les modèles faibles
+        ax.axhline(y=0.8, color="gray", linestyle="--", linewidth=0.7, alpha=0.5)
+
+    # ── 4ème sous-graphique : Accuracy globale (une barre par modèle) ─────────
+    ax = axes[3]
+    for j, r in enumerate(results):
+        hatch = "//" if r.get("penalized") else ""
+        ax.bar(j, r["accuracy"], width=0.5, color="#8172B2",
+               hatch=hatch, edgecolor="black", linewidth=0.5)
+        # Valeur affichée au-dessus de chaque barre
+        ax.text(j, r["accuracy"] + 0.01, f"{r['accuracy']:.3f}",
+                ha="center", va="bottom", fontsize=9)
+
+    ax.set_xticks(range(n_models))
+    ax.set_xticklabels(model_labels, fontsize=9)
+    ax.set_ylim(0, 1.15)
+    ax.set_title("Accuracy globale", fontsize=11)
+    ax.axhline(y=0.8, color="gray", linestyle="--", linewidth=0.7, alpha=0.5)
+
+    # Note commune en bas de figure
+    if any(r.get("penalized") for r in results):
+        fig.text(0.5, 0.005, "★  //  = pénalisation classe vitale active",
+                 ha="center", fontsize=9, color="gray")
+
+    fig.suptitle("Comparaison des modèles — Métriques complètes", fontsize=14, y=1.01)
     plt.tight_layout()
-    plt.savefig(os.path.join(_ARTIFACTS_DIR, "benchmark_f1_par_classe.png"), dpi=150)
+    base = output_dir if output_dir else _ARTIFACTS_DIR
+    plt.savefig(os.path.join(base, "benchmark_metriques.png"), dpi=150, bbox_inches="tight")
     plt.close(fig)
+    print(f"  → benchmark_metriques.png sauvegardé dans {base}")
 
-    # Graphe ressources (uniquement si profils fournis)
-    if profiles:
-        perf_metrics = [c for c in ["train_time_s", "inference_time_per_sample_ms",
-                                     "ram_inference_peak_mb"] if c in df.columns]
-        fig, axes = plt.subplots(1, len(perf_metrics), figsize=(5 * len(perf_metrics), 4))
-        if len(perf_metrics) == 1:
-            axes = [axes]
-        for ax, col in zip(axes, perf_metrics):
-            vals = df[col].fillna(0).infer_objects(copy=False)
-            ax.bar(range(len(df)), vals, color="steelblue")
-            ax.set_xticks(range(len(df)))
-            ax.set_xticklabels(df["model"], rotation=15, ha="right")
-            ax.set_title(col.replace("_", " "))
-            ax.set_ylim(0, vals.max() * 1.2 if vals.max() > 0 else 1)
-        plt.suptitle("Benchmark — ressources")
-        plt.tight_layout()
-        plt.savefig(os.path.join(_ARTIFACTS_DIR, "benchmark_ressources.png"), dpi=150)
-        plt.close(fig)
 
-    return df
+def benchmark_resources(profiles, output_dir=None):
+    """
+    Génère un tableau PNG comparant les performances techniques de tous les modèles.
+    Chaque ligne = un modèle. Colonnes = temps, inférence, RAM, CPU.
+    Sauvegardé dans output_dir/benchmark_ressources.png (ou artifacts/ par défaut).
+    """
+    if not profiles:
+        return
+
+    col_labels = [
+        "Modèle",
+        "Train (s)",
+        "Inférence (s)",
+        "ms / échantillon",
+        "RAM pic (MB)",
+        "CPU (%)",
+    ]
+
+    cell_vals = []
+    for p in profiles:
+        row = [
+            p["model_name"],
+            f"{p['train_time_s']:.3f}"          if p["train_time_s"]          is not None else "—",
+            f"{p['inference_time_total_s']:.6f}",
+            f"{p['inference_time_per_sample_ms']:.4f}",
+            f"{p['ram_inference_peak_mb']:.2f}",
+            f"{p['cpu_inference_percent']:.1f}"  if p["cpu_inference_percent"] is not None else "—",
+        ]
+        cell_vals.append(row)
+
+    n_rows = len(cell_vals)
+
+    fig, ax = plt.subplots(figsize=(14, 0.8 * (n_rows + 2)))
+    ax.axis("off")
+
+    tbl = ax.table(
+        cellText=cell_vals,
+        colLabels=col_labels,
+        cellLoc="center",
+        loc="center",
+    )
+    tbl.auto_set_font_size(False)
+    tbl.set_fontsize(10)
+    tbl.scale(1, 2.0)
+    ax.set_title("Comparaison des modèles — Performances ressources", fontsize=13, pad=15)
+    plt.tight_layout()
+    base = output_dir if output_dir else _ARTIFACTS_DIR
+    plt.savefig(os.path.join(base, "benchmark_ressources.png"), dpi=150)
+    plt.close(fig)
+    print(f"  → benchmark_ressources.png sauvegardé dans {base}")
+
+
+def benchmark_confusion(results, label_names=None, output_dir=None):
+    """
+    Génère une figure PNG avec toutes les matrices de confusion côte à côte.
+    Permet un coup d'œil global pour comparer les modèles visuellement.
+    Le statut de pénalisation est indiqué sous le titre de chaque matrice.
+    Sauvegardé dans artifacts/benchmark_confusion.png.
+    """
+    if not results:
+        return
+
+    classes = list(results[0]["par_classe"].keys())
+    if label_names:
+        display_names = [label_names.get(cls, str(cls)) for cls in classes]
+    else:
+        display_names = [str(cls) for cls in classes]
+
+    n_models = len(results)
+
+    fig, axes = plt.subplots(1, n_models, figsize=(5 * n_models, 4.5))
+
+    # Si un seul modèle, axes est un objet unique et non une liste → on le normalise
+    if n_models == 1:
+        axes = [axes]
+
+    for ax, r in zip(axes, results):
+        cm = np.array(r["confusion_matrix"])
+        disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=display_names)
+        disp.plot(ax=ax, colorbar=False, cmap="Blues", values_format=".2f")
+
+        # Titre = nom du modèle + statut de pénalisation sur une deuxième ligne
+        pen_label = "★ Pénalisé" if r.get("penalized") else "Non pénalisé"
+        ax.set_title(f"{r['model_name']}\n{pen_label}", fontsize=10, pad=8)
+
+        plt.setp(ax.get_xticklabels(), rotation=30, ha="right", fontsize=8)
+        plt.setp(ax.get_yticklabels(), fontsize=8)
+
+    fig.suptitle("Matrices de confusion — Vue comparative", fontsize=13, y=1.02)
+    plt.tight_layout()
+    base = output_dir if output_dir else _ARTIFACTS_DIR
+    plt.savefig(os.path.join(base, "benchmark_confusion.png"), dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  → benchmark_confusion.png sauvegardé dans {base}")

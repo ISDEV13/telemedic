@@ -1,0 +1,24 @@
+#!/bin/sh
+# Hook git pre-push — lancé automatiquement avant chaque git push
+# Bloque le push si les tests fonctionnels échouent
+
+echo ""
+echo ">>> Tests fonctionnels avant le push..."
+echo ""
+
+cd backend || exit 1
+
+.backvenv/Scripts/pytest tests/test_fonctionnel.py -v
+
+if [ $? -ne 0 ]; then
+  echo ""
+  echo ">>> Tests fonctionnels échoués — push annulé."
+  echo ">>> Corrige les erreurs puis relance git push."
+  echo ""
+  exit 1
+fi
+
+echo ""
+echo ">>> Tests fonctionnels OK — push autorisé."
+echo ""
+exit 0
