@@ -1,9 +1,0 @@
-{
-  "model_name": "RandomForest",
-  "train_time_s": null,
-  "inference_time_total_s": 0.048005,
-  "inference_time_per_sample_ms": 0.0238,
-  "ram_train_delta_mb": null,
-  "ram_inference_peak_mb": 1.2,
-  "cpu_inference_percent": null
-}

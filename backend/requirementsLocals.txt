@@ -1,0 +1,22 @@
+﻿# Entraînement des modèles (choix_model_inline.py)
+scikit-learn
+xgboost
+lightgbm
+tensorflow
+pandas
+numpy
+scipy
+matplotlib
+joblib
+psutil
+mlflow
+
+# Backend FastAPI (local dev)
+fastapi
+uvicorn[standard]
+pydantic
+prometheus-fastapi-instrumentator
+
+# Frontend Streamlit (local dev)
+streamlit
+requests

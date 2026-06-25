@@ -4,3 +4,6 @@ CLAUDE.md
 .backvenv
 backend/.backvenv/
 __pycache__
+backend/models
+backend/mlflow.db
+backend/mlruns

@@ -30,6 +30,7 @@ def analyse_missing_values(df):
     _save("missing_bar.png")
 
     msno.heatmap(df)
+    
     plt.title("Corrélation des valeurs manquantes")
     _save("missing_heatmap.png")
 

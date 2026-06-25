@@ -3,35 +3,62 @@ services:
     build: ./backend
     ports:
       - "8000:8000"
+    volumes:
+      # Les modèles pkl sont générés en local et montés dans le conteneur
+      - ./backend/models:/app/models
+      # Le CSV d'historique persiste entre les redémarrages
+      - ./backend/predictions_history.csv:/app/predictions_history.csv
 
   frontend:
-    build:
-      context: ./frontend
-      dockerfile: DockerFile
+    build: ./frontend
     ports:
       - "8501:8501"
+    environment:
+      # Le frontend appelle le backend via le nom du service Docker
+      - BACKEND_URL=http://backend:8000
     depends_on:
       - backend
 
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:latest
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./backend/mlruns:/mlruns
+    environment:
+      - MLFLOW_ALLOW_FILE_STORE=true
+    command: mlflow server --host 0.0.0.0 --port 5000 --backend-store-uri /mlruns
+
   node-exporter:
-    image: prom/node-exporter
+    image: prom/node-exporter:latest
     ports:
       - "9100:9100"
 
   prometheus:
-    build: ./prometheus
+    image: prom/prometheus:latest
     ports:
       - "9090:9090"
+    volumes:
+      # Fichier de config qui dit à Prometheus quoi scraper
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      # Persistance des métriques collectées
+      - prometheus-data:/prometheus
     depends_on:
       - backend
       - node-exporter
 
   grafana:
-    image: grafana/grafana
+    image: grafana/grafana:latest
     ports:
       - "3000:3000"
     environment:
+      # Mot de passe admin par défaut (login: admin / admin)
       - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      # Provisioning auto : Prometheus est ajouté comme source de données au démarrage
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+      # Persistance des dashboards créés
+      - grafana-data:/var/lib/grafana
     depends_on:
       - prometheus
 
@@ -40,8 +67,12 @@ services:
     ports:
       - "3001:3001"
     volumes:
+      # Persistance des monitors et alertes configurés
       - uptime-kuma-data:/app/data
     restart: unless-stopped
 
 volumes:
+  # Données Prometheus et Grafana conservées entre les redémarrages
+  prometheus-data:
+  grafana-data:
   uptime-kuma-data:
