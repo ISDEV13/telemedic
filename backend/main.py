@@ -30,14 +30,15 @@ except FileNotFoundError:
 # Les fichiers utilitaires (preprocessor, tfidf) sont exclus
 _UTILITY_FILES = {"preprocessor", "tfidf"}
 _MODELS = {}
-for _fname in os.listdir(_MODELS_DIR):
-    if _fname.startswith("S2_") and _fname.endswith(".pkl"):
-        _name = _fname[len("S2_"):-len(".pkl")]
-        if _name not in _UTILITY_FILES:
-            try:
-                _MODELS[_name] = joblib.load(os.path.join(_MODELS_DIR, _fname))
-            except Exception as e:
-                print(f"[WARNING] Impossible de charger {_fname} : {e}")
+if os.path.isdir(_MODELS_DIR):
+    for _fname in os.listdir(_MODELS_DIR):
+        if _fname.startswith("S2_") and _fname.endswith(".pkl"):
+            _name = _fname[len("S2_"):-len(".pkl")]
+            if _name not in _UTILITY_FILES:
+                try:
+                    _MODELS[_name] = joblib.load(os.path.join(_MODELS_DIR, _fname))
+                except Exception as e:
+                    print(f"[WARNING] Impossible de charger {_fname} : {e}")
 
 # =============================================================
 # CONSTANTES DE PÉNALISATION (identiques à l'entraînement)
