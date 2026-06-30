@@ -18,7 +18,7 @@ except ImportError:
 
 from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
-from sklearn.preprocessing import MinMaxScaler, RobustScaler, OneHotEncoder
+from sklearn.preprocessing import MinMaxScaler, OneHotEncoder
 from sklearn.compose import ColumnTransformer
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
@@ -47,27 +47,15 @@ N_FOLDS      = 5
 
 # Hyperparamètres :
 # Pénalisation asymétrique : une erreur vitale coûte 15x plus qu'une erreur non-urgente
-CLASS_WEIGHT = {0: 1, 1:8, 2: 24}
+CLASS_WEIGHT = {0: 1, 1: 6, 2: 15}
 # Seuil vital abaissé à 0.15 : mieux vaut sur-classer que rater un cas vital
-THRESHOLDS = {2: 0.20, 1: 0.30}
+THRESHOLDS = {2: 0.30, 1: 0.40}
 
 # Hyperparamètres TF-IDF partagés par tous les scénarios avec texte (S1/S2/S3).
 # Centralisés ici pour servir de source unique (utilisés à l'entraînement ET logués dans MLflow).
 TFIDF_MAX_FEATURES = 500       # ne garde que les 500 mots les plus informatifs
 TFIDF_NGRAM_RANGE  = (1, 2)    # mots seuls + paires de mots ("douleur thoracique")
 TFIDF_SUBLINEAR_TF = True      # atténue le poids des mots très répétés (log)
-
-# Choix du scaler appliqué au bloc tabulaire — interrupteur pour l'analyse de sensibilité.
-# "minmax" → MinMaxScaler : valeurs dans [0,1], homogène avec le TF-IDF, mais sensible aux extrêmes.
-# "robust" → RobustScaler : médiane + IQR, robuste aux extrêmes médicaux réels (SpO2 78, FC 180).
-SCALER_NAME = "robust"
-
-
-def _make_scaler():
-    """Retourne une instance NEUVE du scaler choisi (un scaler par pipeline, pas de partage d'état)."""
-    if SCALER_NAME == "robust":
-        return RobustScaler()
-    return MinMaxScaler()
 
 
 def _label_config(use_class_weight, use_thresholds):
@@ -215,7 +203,7 @@ def run_scenario_complet(data_path, use_class_weight=True, use_thresholds=True):
     # Médiane robuste aux outliers médicaux, MinMax pour homogénéiser les échelles
     num_pipeline = Pipeline([
         ("imputer", SimpleImputer(strategy="median")),
-        ("scaler",  _make_scaler()),
+        ("scaler",  MinMaxScaler()),
     ])
     # Mode pour les NA, OneHot pour ne pas introduire d'ordre artificiel entre modalités
     cat_pipeline = Pipeline([
@@ -885,7 +873,7 @@ def run_scenario_ethique(data_path, use_class_weight=True, use_thresholds=True):
 
     num_pipeline = Pipeline([
         ("imputer", SimpleImputer(strategy="median")),
-        ("scaler",  _make_scaler()),
+        ("scaler",  MinMaxScaler()),
     ])
     cat_pipeline = Pipeline([
         ("imputer", SimpleImputer(strategy="most_frequent")),
@@ -2091,7 +2079,7 @@ def run_scenario_clinique(data_path, use_class_weight=True, use_thresholds=True)
 
     num_pipeline = Pipeline([
         ("imputer", SimpleImputer(strategy="median")),
-        ("scaler",  _make_scaler()),
+        ("scaler",  MinMaxScaler()),
     ])
     preprocessor = ColumnTransformer([
         ("num", num_pipeline, num_cols),
@@ -2924,98 +2912,42 @@ def comparer_et_sauvegarder(results_avec, results_sans, artifacts_dir, models_di
         print(f"  Sauvegardé : {fname}")
 
     # ==========================================================
-    # FIGURE F — Grille globale (tous scénarios × tous modèles), une par config
+    # FIGURE F — Grille globale (tous scénarios × tous modèles, avec pénalisation)
     # ==========================================================
     # Légende axes : PU = Pas urgent, U = Urgent, TU = Très urgent
-    # On génère la même grille pour la config étudiée ET la baseline (fichiers distincts).
     n_sc_f   = len(scenarios)
     n_mod_f  = n_models
-    grilles_globales = [
-        (results_avec, label_avec, caption_penalisation,    "confusions_global.png"),
-        (results_sans, label_sans, _caption_config(*cfg_sans), "confusions_global_sans.png"),
-    ]
-    for results_grille, label_grille, caption_grille, fname_grille in grilles_globales:
-        fig, axes = plt.subplots(n_sc_f, n_mod_f, figsize=(4 * n_mod_f, 4 * n_sc_f))
-        fig.suptitle(
-            f"Matrices de confusion — vue globale ({label_grille})\n"
-            "PU = Pas urgent  |  U = Urgent  |  TU = Très urgent",
-            fontsize=12, fontweight="bold",
-        )
-        for row, (sc_name, sc_results) in enumerate(results_grille.items()):
-            for col, r in enumerate(sc_results):
-                ax = axes[row][col]
-                cm = np.array(r["confusion_matrix"])
-                ax.imshow(cm, interpolation="nearest", cmap="Blues", vmin=0, vmax=1)
-                ax.set_xticks([0, 1, 2])
-                ax.set_yticks([0, 1, 2])
-                ax.set_xticklabels(["PU", "U", "TU"], fontsize=7)
-                ax.set_yticklabels(["PU", "U", "TU"], fontsize=7)
-                for i in range(3):
-                    for j in range(3):
-                        ax.text(
-                            j, i, f"{cm[i, j]:.2f}",
-                            ha="center", va="center", fontsize=8,
-                            color="white" if cm[i, j] > 0.5 else "black",
-                        )
-                if row == 0:
-                    ax.set_title(short_names.get(r["model_name"], r["model_name"]), fontsize=10)
-                if col == 0:
-                    ax.set_ylabel(sc_name.split(" - ")[0], fontsize=9)
-        plt.tight_layout()
-        fig.text(0.5, 0.005, caption_grille, ha="center", fontsize=8, style="italic", color="#555")
-        fig.savefig(os.path.join(artifacts_dir, fname_grille), dpi=120, bbox_inches="tight")
-        plt.close(fig)
-        print(f"  Sauvegardé : {fname_grille}")
-
-    # ==========================================================
-    # FIGURE G — Tableau récapitulatif des métriques, 1 figure par scénario
-    # ==========================================================
-    # Rendu sous forme de tableau (image) : métriques non-CV + CV par modèle.
-    table_cols = ["Recall cl.2", "Recall cl.1", "Préc. cl.0",
-                  "CV cl.2 (±σ)", "CV préc.0 (±σ)", "Train (s)", "Inf (ms)", "RAM (MB)"]
-    for sc_name, sc_results in results_avec.items():
-        # Une ligne par modèle : libellé + valeurs formatées
-        rows_labels = []
-        cell_text   = []
-        for r in sc_results:
-            rows_labels.append(r["model_name"])
-            # CV : "moyenne ± écart-type", ou N/A (cas du NN, CV non calculée)
-            cv2 = (f"{r['cv_recall2_mean']:.2f} ± {r['cv_recall2_std']:.2f}"
-                   if r["cv_recall2_mean"] is not None else "N/A")
-            cvp0 = (f"{r['cv_precision0_mean']:.2f} ± {r['cv_precision0_std']:.2f}"
-                    if r["cv_precision0_mean"] is not None else "N/A")
-            cell_text.append([
-                f"{r['recall_class2']:.2f}",
-                f"{r['recall_class1']:.2f}",
-                f"{r['precision_class0']:.2f}",
-                cv2,
-                cvp0,
-                f"{r['train_time_s']:.2f}",
-                f"{r['inference_time_ms_per_sample']:.3f}",
-                f"{r['ram_peak_mb']:.2f}",
-            ])
-
-        # Hauteur proportionnelle au nombre de modèles
-        fig, ax = plt.subplots(figsize=(13, 0.6 * len(sc_results) + 2))
-        ax.axis("off")
-        fig.suptitle(f"Métriques par modèle — {sc_name} ({label_avec})", fontsize=13, fontweight="bold")
-        tbl = ax.table(
-            cellText=cell_text, rowLabels=rows_labels, colLabels=table_cols,
-            cellLoc="center", rowLoc="center", loc="center",
-        )
-        tbl.auto_set_font_size(False)
-        tbl.set_fontsize(9)
-        tbl.scale(1, 1.6)
-        # En-tête (ligne 0) en gras sur fond bleu
-        for j in range(len(table_cols)):
-            tbl[0, j].set_facecolor("#1565c0")
-            tbl[0, j].set_text_props(color="white", fontweight="bold")
-        fig.text(0.5, 0.02, caption_penalisation, ha="center", fontsize=8, style="italic", color="#555")
-        safe = sc_name.replace(" - ", "_").replace(" ", "_")
-        fname = f"tableau_metriques_{safe}.png"
-        fig.savefig(os.path.join(artifacts_dir, fname), dpi=150, bbox_inches="tight")
-        plt.close(fig)
-        print(f"  Sauvegardé : {fname}")
+    fig, axes = plt.subplots(n_sc_f, n_mod_f, figsize=(4 * n_mod_f, 4 * n_sc_f))
+    fig.suptitle(
+        f"Matrices de confusion — vue globale ({label_avec})\n"
+        "PU = Pas urgent  |  U = Urgent  |  TU = Très urgent",
+        fontsize=12, fontweight="bold",
+    )
+    for row, (sc_name, sc_results) in enumerate(results_avec.items()):
+        for col, r in enumerate(sc_results):
+            ax = axes[row][col]
+            cm = np.array(r["confusion_matrix"])
+            ax.imshow(cm, interpolation="nearest", cmap="Blues", vmin=0, vmax=1)
+            ax.set_xticks([0, 1, 2])
+            ax.set_yticks([0, 1, 2])
+            ax.set_xticklabels(["PU", "U", "TU"], fontsize=7)
+            ax.set_yticklabels(["PU", "U", "TU"], fontsize=7)
+            for i in range(3):
+                for j in range(3):
+                    ax.text(
+                        j, i, f"{cm[i, j]:.2f}",
+                        ha="center", va="center", fontsize=8,
+                        color="white" if cm[i, j] > 0.5 else "black",
+                    )
+            if row == 0:
+                ax.set_title(short_names.get(r["model_name"], r["model_name"]), fontsize=10)
+            if col == 0:
+                ax.set_ylabel(sc_name.split(" - ")[0], fontsize=9)
+    plt.tight_layout()
+    fig.text(0.5, 0.005, caption_penalisation, ha="center", fontsize=8, style="italic", color="#555")
+    fig.savefig(os.path.join(artifacts_dir, "confusions_global.png"), dpi=120, bbox_inches="tight")
+    plt.close(fig)
+    print("  Sauvegardé : confusions_global.png")
 
     # ==========================================================
     # SAUVEGARDE DES MODÈLES (avec pénalisation uniquement)
@@ -3063,7 +2995,7 @@ def comparer_et_sauvegarder(results_avec, results_sans, artifacts_dir, models_di
 
         # --- runs config étudiée (cfg_avec) ---
         for r in results_avec[sc_name]:
-            with mlflow.start_run(run_name=f"{r['model_name']} — {_label_config(*cfg_avec)} — {SCALER_NAME}"):
+            with mlflow.start_run(run_name=f"{r['model_name']} — {_label_config(*cfg_avec)}"):
                 # Paramètres : identité + pénalisation réelle + hyperparamètres du modèle
                 params = {"scenario": sc_name, "model": r["model_name"]}
                 params.update(_penalisation_params(cfg_avec))
@@ -3073,9 +3005,6 @@ def comparer_et_sauvegarder(results_avec, results_sans, artifacts_dir, models_di
                     params["hp_tfidf_max_features"] = TFIDF_MAX_FEATURES
                     params["hp_tfidf_ngram_range"]  = str(TFIDF_NGRAM_RANGE)
                     params["hp_tfidf_sublinear_tf"] = TFIDF_SUBLINEAR_TF
-                # Scaler du bloc tabulaire (pas de tabulaire en S3 NLP)
-                if not sc_name.startswith("S3"):
-                    params["hp_scaler"] = SCALER_NAME
                 mlflow.log_params(params)
                 mlflow.log_metrics({
                     "recall_class2":                r["recall_class2"],
@@ -3099,20 +3028,14 @@ def comparer_et_sauvegarder(results_avec, results_sans, artifacts_dir, models_di
                     for epoch, v in enumerate(r["history"].get("val_loss", [])):
                         mlflow.log_metric("val_loss", v, step=epoch)
 
-        # --- runs baseline (cfg_sans) ---
+        # --- runs sans pénalisation (baseline) ---
         for r in results_sans[sc_name]:
-            with mlflow.start_run(run_name=f"{r['model_name']} — {_label_config(*cfg_sans)} — {SCALER_NAME}"):
-                # Mêmes paramètres que la config étudiée : identité + pénalisation réelle + hyperparamètres
-                params = {"scenario": sc_name, "model": r["model_name"]}
-                params.update(_penalisation_params(cfg_sans))
-                params.update(_hyperparams(r))
-                if not sc_name.startswith("S4"):
-                    params["hp_tfidf_max_features"] = TFIDF_MAX_FEATURES
-                    params["hp_tfidf_ngram_range"]  = str(TFIDF_NGRAM_RANGE)
-                    params["hp_tfidf_sublinear_tf"] = TFIDF_SUBLINEAR_TF
-                if not sc_name.startswith("S3"):
-                    params["hp_scaler"] = SCALER_NAME
-                mlflow.log_params(params)
+            with mlflow.start_run(run_name=f"{r['model_name']} — sans pénalisation"):
+                mlflow.log_params({
+                    "scenario": sc_name,
+                    "model":    r["model_name"],
+                    "penalize": False,
+                })
                 mlflow.log_metrics({
                     "recall_class2":                r["recall_class2"],
                     "recall_class1":                r["recall_class1"],

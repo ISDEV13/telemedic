@@ -6,8 +6,10 @@
 # =============================================================================
 
 import os
+import re
 import time
 import tracemalloc
+from collections import Counter
 
 import numpy as np
 import matplotlib
@@ -34,7 +36,9 @@ _ARTIFACTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", 
 os.makedirs(_ARTIFACTS_DIR, exist_ok=True)
 
 import pandas as pd
-df = pd.read_csv("backend/dataset_telemed.csv")
+# Chemin absolu vers le dataset (remonte de 2 niveaux depuis modules/ → racine du projet)
+_DATASET_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "dataset_telemed.csv")
+df = pd.read_csv(_DATASET_PATH)
 
 # Voir les valeurs typiques pour chaque classe
 print(df.groupby("niveau_urgence")[["freq_cardiaque", "temp", "sat_oxygene", "tension_sys"]].mean())
@@ -69,6 +73,143 @@ def _weights_label(class_weights, label_names=None):
         name = label_names.get(cls, str(cls)) if label_names else str(cls)
         parts.append(f"{name}={w}")
     return "Poids : " + " · ".join(parts)
+
+
+# =============================================================================
+# ANALYSE EXPLORATOIRE (EDA)
+# =============================================================================
+
+# Étiquettes lisibles par défaut pour la cible niveau_urgence
+_LABELS_URGENCE = {0: "Pas urgent", 1: "Urgent", 2: "Très urgent"}
+
+# Mots-outils français à ignorer dans l'analyse de fréquence du texte
+# (ils n'apportent aucun signal discriminant)
+_STOPWORDS_FR = {
+    "le", "la", "les", "un", "une", "des", "de", "du", "et", "ou", "au", "aux",
+    "en", "dans", "sur", "pour", "par", "avec", "sans", "ce", "cet", "cette",
+    "ces", "je", "tu", "il", "elle", "on", "nous", "vous", "ils", "elles",
+    "se", "sa", "son", "ses", "mes", "mon", "ma", "est", "pas", "ne", "que",
+    "qui", "plus", "mais", "ses", "leur", "leurs",
+}
+
+
+def analyse_features_vs_cible(df, output_dir=None, label_names=None):
+    """
+    EDA bivariée — point 2 : distribution de chaque constante vitale SELON le niveau
+    d'urgence. Un boxplot par feature, une boîte par classe. Révèle le "profil-type"
+    de chaque niveau et quelles variables discriminent vraiment les classes.
+
+    Args:
+        df          : DataFrame contenant les features + la colonne niveau_urgence
+        output_dir  : dossier de sortie (par défaut artifacts/)
+        label_names : dict {classe: nom lisible}, ex {0: "Pas urgent", ...}
+
+    Sauvegarde : eda_features_vs_cible.png
+    """
+    base = output_dir if output_dir else _ARTIFACTS_DIR
+    os.makedirs(base, exist_ok=True)
+    label_names = label_names if label_names else _LABELS_URGENCE
+
+    # Constantes vitales numériques cliniquement parlantes — on ne garde que celles présentes
+    features = ["freq_cardiaque", "tension_sys", "temp", "sat_oxygene", "age", "duree_symptomes"]
+    features = [c for c in features if c in df.columns]
+
+    # Classes triées + étiquettes lisibles pour l'axe X
+    classes = sorted(df["niveau_urgence"].dropna().unique())
+    xticklabels = [label_names.get(c, str(c)) for c in classes]
+
+    # Grille de subplots, 3 colonnes
+    n_cols = 3
+    n_rows = (len(features) + n_cols - 1) // n_cols
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 4 * n_rows))
+    axes = np.array(axes).reshape(-1)  # aplatit la grille pour itérer simplement
+
+    for ax, feat in zip(axes, features):
+        # Une boîte par classe : on regroupe les valeurs de la feature par niveau d'urgence
+        data_par_classe = [df.loc[df["niveau_urgence"] == c, feat].dropna() for c in classes]
+        ax.boxplot(data_par_classe)
+        ax.set_xticks(range(1, len(classes) + 1))
+        ax.set_xticklabels(xticklabels, rotation=15)
+        ax.set_title(f"{feat} selon l'urgence")
+        ax.set_ylabel(feat)
+        ax.grid(axis="y", alpha=0.3)
+
+    # On masque les cases vides éventuelles de la grille
+    for ax in axes[len(features):]:
+        ax.axis("off")
+
+    fig.suptitle("EDA bivariée — constantes vitales × niveau d'urgence", fontsize=14, fontweight="bold")
+    plt.tight_layout()
+    plt.savefig(os.path.join(base, "eda_features_vs_cible.png"), dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print("  Sauvegardé : eda_features_vs_cible.png")
+
+
+def analyse_texte(df, output_dir=None, label_names=None, top_n=12, col="description_symptomes"):
+    """
+    EDA du texte libre — point 3 : analyse de la colonne description_symptomes,
+    la modalité qui pilote le modèle. Produit deux vues :
+      1. Longueur des descriptions (en mots) selon le niveau d'urgence
+      2. Mots les plus fréquents par niveau d'urgence (hors mots-outils)
+
+    Args:
+        df          : DataFrame avec la colonne texte + niveau_urgence
+        output_dir  : dossier de sortie (par défaut artifacts/)
+        label_names : dict {classe: nom lisible}
+        top_n       : nombre de mots les plus fréquents à afficher par classe
+        col         : nom de la colonne texte
+
+    Sauvegarde : eda_texte.png
+    """
+    base = output_dir if output_dir else _ARTIFACTS_DIR
+    os.makedirs(base, exist_ok=True)
+    label_names = label_names if label_names else _LABELS_URGENCE
+    classes = sorted(df["niveau_urgence"].dropna().unique())
+
+    # Texte en chaînes (les NaN deviennent des chaînes vides)
+    textes = df[col].fillna("").astype(str)
+
+    def tokenize(s):
+        # On garde les mots de 2+ lettres (accents inclus), en minuscules, sans mots-outils
+        mots = re.findall(r"\b[a-zàâäéèêëîïôöùûüç]{2,}\b", s.lower())
+        return [m for m in mots if m not in _STOPWORDS_FR]
+
+    # Longueur "brute" de chaque description (tous les mots, pour refléter la vraie taille)
+    longueurs = textes.apply(lambda s: len(re.findall(r"\b\w+\b", s)))
+
+    # Figure : 1 colonne pour la longueur + 1 colonne de top-mots par classe
+    fig, axes = plt.subplots(1, len(classes) + 1, figsize=(5 * (len(classes) + 1), 5))
+
+    # ── Vue 1 : longueur des descriptions par classe ──────────────────────────
+    data_long = [longueurs[df["niveau_urgence"] == c] for c in classes]
+    axes[0].boxplot(data_long)
+    axes[0].set_xticks(range(1, len(classes) + 1))
+    axes[0].set_xticklabels([label_names.get(c, str(c)) for c in classes], rotation=15)
+    axes[0].set_title("Longueur des descriptions")
+    axes[0].set_ylabel("nombre de mots")
+    axes[0].grid(axis="y", alpha=0.3)
+
+    # ── Vue 2 : top mots fréquents par classe ─────────────────────────────────
+    for i, c in enumerate(classes, start=1):
+        compteur = Counter()
+        for s in textes[df["niveau_urgence"] == c]:
+            compteur.update(tokenize(s))
+        tops = compteur.most_common(top_n)
+        if tops:
+            mots, freqs = zip(*tops)
+            y = np.arange(len(mots))
+            axes[i].barh(y, freqs, color="#2e7d32")
+            axes[i].set_yticks(y)
+            axes[i].set_yticklabels(mots)
+            axes[i].invert_yaxis()  # le mot le plus fréquent en haut
+        axes[i].set_title(f"Top mots — {label_names.get(c, str(c))}")
+        axes[i].set_xlabel("fréquence")
+
+    fig.suptitle("EDA texte — longueur et vocabulaire par niveau d'urgence", fontsize=14, fontweight="bold")
+    plt.tight_layout()
+    plt.savefig(os.path.join(base, "eda_texte.png"), dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print("  Sauvegardé : eda_texte.png")
 
 
 # =============================================================================
@@ -584,3 +725,13 @@ def benchmark_confusion(results, label_names=None, output_dir=None):
     plt.savefig(os.path.join(base, "benchmark_confusion.png"), dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"  → benchmark_confusion.png sauvegardé dans {base}")
+
+
+# =============================================================================
+# EXÉCUTION DIRECTE — génère les figures d'analyse exploratoire
+# =============================================================================
+# Ce bloc ne s'exécute QUE si on lance `python modules/evaluate.py` directement,
+# pas lors d'un simple import du module (évite de relancer les calculs à chaque import).
+if __name__ == "__main__":
+    analyse_features_vs_cible(df)
+    analyse_texte(df)

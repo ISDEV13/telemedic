@@ -8,4 +8,12 @@ backend/models
 backend/mlflow.db
 backend/mlruns
 backend/predictions_history.csv
+echanges_claude.md
+flow_cicd_monitoring.drawio
+flow_cicd_monitoring.excalidraw
+presentation_powerpoint.md
+Question_jury.md
+analyse_projet.md
+
+
 

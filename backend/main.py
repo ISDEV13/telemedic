@@ -8,6 +8,7 @@ from datetime import datetime
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, field_validator
 from prometheus_fastapi_instrumentator import Instrumentator
+from tensorflow import keras  # nécessaire pour charger le NeuralNetwork (.keras) au démarrage
 
 app = FastAPI(title="Télémédecine — API de triage")
 Instrumentator().instrument(app).expose(app)
@@ -39,11 +40,18 @@ if os.path.isdir(_MODELS_DIR):
                     _MODELS[_name] = joblib.load(os.path.join(_MODELS_DIR, _fname))
                 except Exception as e:
                     print(f"[WARNING] Impossible de charger {_fname} : {e}")
+        elif _fname.startswith("S2_") and _fname.endswith(".keras"):
+            # Réseau de neurones Keras : chargé via keras.models.load_model (joblib ne gère pas les poids TF)
+            _name = _fname[len("S2_"):-len(".keras")]
+            try:
+                _MODELS[_name] = keras.models.load_model(os.path.join(_MODELS_DIR, _fname))
+            except Exception as e:
+                print(f"[WARNING] Impossible de charger {_fname} : {e}")
 
 # =============================================================
 # CONSTANTES DE PÉNALISATION (identiques à l'entraînement)
 # =============================================================
-_THRESHOLDS = {2: 0.15, 1: 0.20}
+_THRESHOLDS = {2: 0.30, 1: 0.40}
 _AGE_BINS   = [0, 17, 40, 64, float("inf")]
 _AGE_LABELS = ["enfant", "adulte_jeune", "adulte", "senior"]
 _NUM_ETH    = ["freq_cardiaque", "tension_sys", "temp", "sat_oxygene", "antecedents", "duree_symptomes"]
@@ -177,9 +185,15 @@ def predict(patient: PatientInput):
     X = sp.hstack([sp.csr_matrix(X_tab), X_txt], format="csr")
 
     # 7. Prédire avec les seuils abaissés (mêmes que l'entraînement)
-    proba   = model.predict_proba(X)[0]
-    classes = model.classes_
-    idx     = {cls: i for i, cls in enumerate(classes)}
+    # sklearn / XGBoost / LightGBM exposent predict_proba + classes_ ; le NN Keras non
+    if hasattr(model, "predict_proba"):
+        proba   = model.predict_proba(X)[0]
+        classes = model.classes_
+        idx     = {cls: i for i, cls in enumerate(classes)}
+    else:
+        # Réseau de neurones Keras : entrée dense, sortie softmax, classes implicites [0, 1, 2]
+        proba = model.predict(X.toarray(), verbose=0)[0]
+        idx   = {0: 0, 1: 1, 2: 2}
 
     if proba[idx[2]] >= _THRESHOLDS[2]:
         prediction = 2
