@@ -18,7 +18,7 @@ except ImportError:
 
 from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
-from sklearn.preprocessing import MinMaxScaler, OneHotEncoder
+from sklearn.preprocessing import MinMaxScaler, RobustScaler, OneHotEncoder
 from sklearn.compose import ColumnTransformer
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
@@ -47,9 +47,96 @@ N_FOLDS      = 5
 
 # Hyperparamètres :
 # Pénalisation asymétrique : une erreur vitale coûte 15x plus qu'une erreur non-urgente
-CLASS_WEIGHT = {0: 1, 1: 12, 2: 25}
+CLASS_WEIGHT = {0: 1, 1:8, 2: 24}
 # Seuil vital abaissé à 0.15 : mieux vaut sur-classer que rater un cas vital
-THRESHOLDS = {2: 0.10, 1: 0.15}
+THRESHOLDS = {2: 0.20, 1: 0.30}
+
+# Hyperparamètres TF-IDF partagés par tous les scénarios avec texte (S1/S2/S3).
+# Centralisés ici pour servir de source unique (utilisés à l'entraînement ET logués dans MLflow).
+TFIDF_MAX_FEATURES = 500       # ne garde que les 500 mots les plus informatifs
+TFIDF_NGRAM_RANGE  = (1, 2)    # mots seuls + paires de mots ("douleur thoracique")
+TFIDF_SUBLINEAR_TF = True      # atténue le poids des mots très répétés (log)
+
+# Choix du scaler appliqué au bloc tabulaire — interrupteur pour l'analyse de sensibilité.
+# "minmax" → MinMaxScaler : valeurs dans [0,1], homogène avec le TF-IDF, mais sensible aux extrêmes.
+# "robust" → RobustScaler : médiane + IQR, robuste aux extrêmes médicaux réels (SpO2 78, FC 180).
+SCALER_NAME = "robust"
+
+
+def _make_scaler():
+    """Retourne une instance NEUVE du scaler choisi (un scaler par pipeline, pas de partage d'état)."""
+    if SCALER_NAME == "robust":
+        return RobustScaler()
+    return MinMaxScaler()
+
+
+def _label_config(use_class_weight, use_thresholds):
+    """
+    Traduit la configuration de pénalisation en libellé lisible (pour les figures).
+    Les deux leviers sont indépendants → 4 combinaisons possibles.
+    """
+    if use_class_weight and use_thresholds:
+        return "Class weight + seuils"
+    if use_class_weight:
+        return "Class weight seul"
+    if use_thresholds:
+        return "Seuils seuls"
+    return "Aucune (argmax)"
+
+
+def _caption_config(use_class_weight, use_thresholds):
+    """
+    Construit la légende rappelant les valeurs EXACTES réellement appliquées.
+    On n'affiche un levier que s'il est actif → la figure ne ment jamais.
+    """
+    parts = []
+    if use_class_weight:
+        parts.append(f"Class weight = {CLASS_WEIGHT}")
+    if use_thresholds:
+        parts.append(f"Seuils : classe 2 ≥ {THRESHOLDS[2]}, classe 1 ≥ {THRESHOLDS[1]}")
+    if not parts:
+        return "Aucune pénalisation (argmax standard)"
+    return "   ·   ".join(parts)
+
+
+def _penalisation_params(cfg):
+    """
+    Paramètres de pénalisation à logger dans MLflow, à partir de la config réelle
+    cfg = (use_class_weight, use_thresholds). On ne loggue une valeur que si le
+    levier correspondant est actif → le tracking reflète exactement ce qui a tourné.
+    """
+    use_class_weight, use_thresholds = cfg
+    params = {
+        "use_class_weight": use_class_weight,
+        "use_thresholds":   use_thresholds,
+    }
+    if use_class_weight:
+        params["class_weight_0"] = CLASS_WEIGHT[0]
+        params["class_weight_1"] = CLASS_WEIGHT[1]
+        params["class_weight_2"] = CLASS_WEIGHT[2]
+    if use_thresholds:
+        params["threshold_vital"]  = THRESHOLDS[2]
+        params["threshold_urgent"] = THRESHOLDS[1]
+    return params
+
+
+def _hyperparams(r):
+    """
+    Hyperparamètres du modèle à logger dans MLflow, préfixés 'hp_'.
+    - sklearn / XGBoost / LightGBM : get_params() est exhaustif et automatique.
+    - NeuralNetwork (Keras) : pas de get_params(), on déclare ses hyperparamètres clés
+      (doit refléter la définition du réseau dans les fonctions de scénario).
+    """
+    if r["model_name"] == "NeuralNetwork":
+        return {
+            "hp_dense_1":    256,
+            "hp_dense_2":    128,
+            "hp_dropout":    0.3,
+            "hp_epochs":     100,
+            "hp_batch_size": 64,
+            "hp_optimizer":  "adam",
+        }
+    return {f"hp_{k}": v for k, v in r["model"].get_params().items()}
 
 # Valeurs physiquement impossibles — pas des seuils cliniques, juste des limites absolues
 _BORNES = {
@@ -59,11 +146,11 @@ _BORNES = {
     "temp":            (0, 60),
     "sat_oxygene":     (0, 100),
     "duree_symptomes": (0, None),
-    "antecedents":     (0, None),
+    "antecedents":     (0, 1),     
 }
 
 
-def run_scenario_complet(data_path, penalize=True):
+def run_scenario_complet(data_path, use_class_weight=True, use_thresholds=True):
     """
     Scénario 1 — Multimodal complet : tabulaire + TF-IDF texte.
     Entraîne 5 modèles (LogReg, RandomForest, XGBoost, LightGBM, NeuralNetwork)
@@ -73,9 +160,11 @@ def run_scenario_complet(data_path, penalize=True):
     ----------
     data_path : str
         Chemin vers le fichier dataset_telemed.csv.
-    penalize : bool
-        True  → class_weight asymétrique + seuils abaissés (configuration production).
-        False → argmax standard, comportement naturel du modèle (baseline).
+    use_class_weight : bool
+        True → applique le class_weight asymétrique {0:1, 1:6, 2:15} à l'entraînement.
+    use_thresholds : bool
+        True → applique les seuils abaissés {2:0.10, 1:0.15} à la prédiction.
+        Les deux à False = argmax standard, comportement naturel du modèle (baseline).
 
     Retour
     ------
@@ -126,7 +215,7 @@ def run_scenario_complet(data_path, penalize=True):
     # Médiane robuste aux outliers médicaux, MinMax pour homogénéiser les échelles
     num_pipeline = Pipeline([
         ("imputer", SimpleImputer(strategy="median")),
-        ("scaler",  MinMaxScaler()),
+        ("scaler",  _make_scaler()),
     ])
     # Mode pour les NA, OneHot pour ne pas introduire d'ordre artificiel entre modalités
     cat_pipeline = Pipeline([
@@ -151,7 +240,7 @@ def run_scenario_complet(data_path, penalize=True):
     # Bigrammes pour capturer des expressions comme "douleur thoracique"
     # sublinear_tf réduit le poids des termes trop fréquents (ex: "le", "un")
     # Hyperparamètres :
-    tfidf    = TfidfVectorizer(max_features=500, ngram_range=(1, 2), sublinear_tf=True)
+    tfidf    = TfidfVectorizer(max_features=TFIDF_MAX_FEATURES, ngram_range=TFIDF_NGRAM_RANGE, sublinear_tf=TFIDF_SUBLINEAR_TF)
     X_txt_tr = tfidf.fit_transform(train_df[_TXT_COL].fillna(""))
     X_txt_te = tfidf.transform(test_df[_TXT_COL].fillna(""))
 
@@ -162,11 +251,11 @@ def run_scenario_complet(data_path, penalize=True):
     # =========================================================
     # 5. PARAMÈTRES DE PÉNALISATION
     # =========================================================
-    class_weight = CLASS_WEIGHT if penalize else None
+    class_weight = CLASS_WEIGHT if use_class_weight else None
     #MODIF TEMPORAIRE 
-    thresholds   = THRESHOLDS   if penalize else None
+    thresholds   = THRESHOLDS   if use_thresholds else None
     # XGBoost gère la pénalisation via sample_weight (pas class_weight comme sklearn)
-    xgb_sw = np.array([CLASS_WEIGHT[int(y)] for y in y_train]) if penalize else None
+    xgb_sw = np.array([CLASS_WEIGHT[int(y)] for y in y_train]) if use_class_weight else None
 
     results = []
 
@@ -186,7 +275,7 @@ def run_scenario_complet(data_path, penalize=True):
     model_lr.fit(X_train, y_train)
     train_time_lr = time.perf_counter() - t0_lr
 
-    # Prédiction avec seuils asymétriques si penalize=True
+    # Prédiction avec seuils asymétriques si use_thresholds=True
     proba_lr = model_lr.predict_proba(X_test)
     if thresholds is not None:
         idx_lr = {cls: i for i, cls in enumerate(model_lr.classes_)}
@@ -715,7 +804,7 @@ def run_scenario_complet(data_path, penalize=True):
     return results
 
 
-def run_scenario_ethique(data_path, penalize=True):
+def run_scenario_ethique(data_path, use_class_weight=True, use_thresholds=True):
     """
     Scénario 2 — Éthique : tabulaire (sans sexe/zone_vie, age discrétisé) + TF-IDF texte.
     Entraîne 5 modèles et renvoie leurs performances médicales et techniques.
@@ -729,9 +818,11 @@ def run_scenario_ethique(data_path, penalize=True):
     ----------
     data_path : str
         Chemin vers le fichier dataset_telemed.csv.
-    penalize : bool
-        True  → class_weight asymétrique + seuils abaissés (configuration production).
-        False → argmax standard, comportement naturel du modèle (baseline).
+    use_class_weight : bool
+        True → applique le class_weight asymétrique {0:1, 1:6, 2:15} à l'entraînement.
+    use_thresholds : bool
+        True → applique les seuils abaissés {2:0.10, 1:0.15} à la prédiction.
+        Les deux à False = argmax standard, comportement naturel du modèle (baseline).
 
     Retour
     ------
@@ -794,7 +885,7 @@ def run_scenario_ethique(data_path, penalize=True):
 
     num_pipeline = Pipeline([
         ("imputer", SimpleImputer(strategy="median")),
-        ("scaler",  MinMaxScaler()),
+        ("scaler",  _make_scaler()),
     ])
     cat_pipeline = Pipeline([
         ("imputer", SimpleImputer(strategy="most_frequent")),
@@ -815,7 +906,7 @@ def run_scenario_ethique(data_path, penalize=True):
     # 5. TF-IDF TEXTE (fit sur train uniquement)
     # =========================================================
     # Hyperparamètres :
-    tfidf    = TfidfVectorizer(max_features=500, ngram_range=(1, 2), sublinear_tf=True)
+    tfidf    = TfidfVectorizer(max_features=TFIDF_MAX_FEATURES, ngram_range=TFIDF_NGRAM_RANGE, sublinear_tf=TFIDF_SUBLINEAR_TF)
     X_txt_tr = tfidf.fit_transform(train_df[_TXT_COL].fillna(""))
     X_txt_te = tfidf.transform(test_df[_TXT_COL].fillna(""))
 
@@ -825,11 +916,11 @@ def run_scenario_ethique(data_path, penalize=True):
     # =========================================================
     # 6. PARAMÈTRES DE PÉNALISATION
     # =========================================================
-    class_weight = CLASS_WEIGHT if penalize else None
+    class_weight = CLASS_WEIGHT if use_class_weight else None
     
     #MODIF TEMPORAIRE 
-    thresholds   = THRESHOLDS   if penalize else None
-    xgb_sw = np.array([CLASS_WEIGHT[int(y)] for y in y_train]) if penalize else None
+    thresholds   = THRESHOLDS   if use_thresholds else None
+    xgb_sw = np.array([CLASS_WEIGHT[int(y)] for y in y_train]) if use_class_weight else None
 
     results = []
 
@@ -1373,7 +1464,7 @@ def run_scenario_ethique(data_path, penalize=True):
     return results
 
 
-def run_scenario_nlp(data_path, penalize=True):
+def run_scenario_nlp(data_path, use_class_weight=True, use_thresholds=True):
     """
     Scénario 3 — NLP seul : uniquement description_symptomes vectorisée en TF-IDF.
     Aucune constante vitale, aucune variable démographique.
@@ -1410,16 +1501,16 @@ def run_scenario_nlp(data_path, penalize=True):
     # Pas de tabulaire — X_train est directement la matrice TF-IDF
     # On garde les mêmes hyperparamètres que S1 pour la comparabilité
     # Hyperparamètres :
-    tfidf   = TfidfVectorizer(max_features=500, ngram_range=(1, 2), sublinear_tf=True)
+    tfidf   = TfidfVectorizer(max_features=TFIDF_MAX_FEATURES, ngram_range=TFIDF_NGRAM_RANGE, sublinear_tf=TFIDF_SUBLINEAR_TF)
     X_train = tfidf.fit_transform(train_df[_TXT_COL].fillna(""))
     X_test  = tfidf.transform(test_df[_TXT_COL].fillna(""))
 
     # =========================================================
     # 4. PARAMÈTRES DE PÉNALISATION
     # =========================================================
-    class_weight = CLASS_WEIGHT if penalize else None
-    thresholds   = THRESHOLDS   if penalize else None
-    xgb_sw = np.array([CLASS_WEIGHT[int(y)] for y in y_train]) if penalize else None
+    class_weight = CLASS_WEIGHT if use_class_weight else None
+    thresholds   = THRESHOLDS   if use_thresholds else None
+    xgb_sw = np.array([CLASS_WEIGHT[int(y)] for y in y_train]) if use_class_weight else None
 
     results = []
 
@@ -1958,7 +2049,7 @@ def run_scenario_nlp(data_path, penalize=True):
     return results
 
 
-def run_scenario_clinique(data_path, penalize=True):
+def run_scenario_clinique(data_path, use_class_weight=True, use_thresholds=True):
     """
     Scénario 4 — Clinique pur : uniquement les constantes vitales numériques + âge.
     Ni texte, ni catégorielles, ni canal de contact.
@@ -2000,7 +2091,7 @@ def run_scenario_clinique(data_path, penalize=True):
 
     num_pipeline = Pipeline([
         ("imputer", SimpleImputer(strategy="median")),
-        ("scaler",  MinMaxScaler()),
+        ("scaler",  _make_scaler()),
     ])
     preprocessor = ColumnTransformer([
         ("num", num_pipeline, num_cols),
@@ -2021,9 +2112,9 @@ def run_scenario_clinique(data_path, penalize=True):
     # =========================================================
     # 4. PARAMÈTRES DE PÉNALISATION
     # =========================================================
-    class_weight = CLASS_WEIGHT if penalize else None
-    thresholds   = THRESHOLDS   if penalize else None
-    xgb_sw = np.array([CLASS_WEIGHT[int(y)] for y in y_train]) if penalize else None
+    class_weight = CLASS_WEIGHT if use_class_weight else None
+    thresholds   = THRESHOLDS   if use_thresholds else None
+    xgb_sw = np.array([CLASS_WEIGHT[int(y)] for y in y_train]) if use_class_weight else None
 
     results = []
 
@@ -2561,7 +2652,8 @@ def run_scenario_clinique(data_path, penalize=True):
     return results
 
 
-def comparer_et_sauvegarder(results_avec, results_sans, artifacts_dir, models_dir):
+def comparer_et_sauvegarder(results_avec, results_sans, artifacts_dir, models_dir,
+                            cfg_avec=(True, True), cfg_sans=(False, False)):
     """
     Compare les résultats de tous les scénarios, génère des figures et sauvegarde modèles.
 
@@ -2609,6 +2701,13 @@ def comparer_et_sauvegarder(results_avec, results_sans, artifacts_dir, models_di
     n_models  = len(model_names)
     n_sc      = len(scenarios)
 
+    # Libellés et légende calculés à partir de la config RÉELLEMENT passée
+    # (cfg_avec / cfg_sans = tuples (use_class_weight, use_thresholds)) — aucune hypothèse en dur.
+    label_avec = _label_config(*cfg_avec)
+    label_sans = _label_config(*cfg_sans)
+    # La légende reflète la config pénalisée (colonne "avec", celle des figures CV/ressources/globale)
+    caption_penalisation = _caption_config(*cfg_avec)
+
     # ==========================================================
     # FIGURES A — 3 figures séparées, une par métrique médicale
     # ==========================================================
@@ -2624,7 +2723,7 @@ def comparer_et_sauvegarder(results_avec, results_sans, artifacts_dir, models_di
         fig.suptitle(metric_title, fontsize=13, fontweight="bold")
         for ax, (results, config_label) in zip(
             axes,
-            [(results_avec, "Avec pénalisation"), (results_sans, "Sans pénalisation")]
+            [(results_avec, label_avec), (results_sans, label_sans)]
         ):
             x = np.arange(n_models)
             w = 0.8 / n_sc
@@ -2651,6 +2750,7 @@ def comparer_et_sauvegarder(results_avec, results_sans, artifacts_dir, models_di
             ax.legend(fontsize=8, loc="lower right")
             ax.grid(axis="y", alpha=0.3)
         plt.tight_layout()
+        fig.text(0.5, 0.005, caption_penalisation, ha="center", fontsize=8, style="italic", color="#555")
         fig.savefig(os.path.join(artifacts_dir, fname), dpi=120, bbox_inches="tight")
         plt.close(fig)
         print(f"  Sauvegardé : {fname}")
@@ -2662,7 +2762,7 @@ def comparer_et_sauvegarder(results_avec, results_sans, artifacts_dir, models_di
     fig.suptitle("Métriques médicales — tous scénarios", fontsize=13, fontweight="bold")
     for row, (metric_key, metric_title, _, _) in enumerate(metrics_cfg):
         for col, (results, config_label) in enumerate(
-            [(results_avec, "Avec pénalisation"), (results_sans, "Sans pénalisation")]
+            [(results_avec, label_avec), (results_sans, label_sans)]
         ):
             ax = axes[row][col]
             x  = np.arange(n_models)
@@ -2690,6 +2790,7 @@ def comparer_et_sauvegarder(results_avec, results_sans, artifacts_dir, models_di
                 ax.legend(fontsize=7)
             ax.grid(axis="y", alpha=0.3)
     plt.tight_layout()
+    fig.text(0.5, 0.005, caption_penalisation, ha="center", fontsize=8, style="italic", color="#555")
     fig.savefig(os.path.join(artifacts_dir, "compare_metriques.png"), dpi=120, bbox_inches="tight")
     plt.close(fig)
     print("  Sauvegardé : compare_metriques.png")
@@ -2703,7 +2804,7 @@ def comparer_et_sauvegarder(results_avec, results_sans, artifacts_dir, models_di
         ("cv_precision0_mean", "cv_precision0_std", "CV Précision — Pas urgent (classe 0)"),
     ]
     fig, axes = plt.subplots(1, 2, figsize=(16, 5))
-    fig.suptitle("Stabilité cross-validation (5 folds) — avec pénalisation", fontsize=13, fontweight="bold")
+    fig.suptitle(f"Stabilité cross-validation (5 folds) — {label_avec}", fontsize=13, fontweight="bold")
     for ax, (mean_key, std_key, cv_title) in zip(axes, cv_cfg):
         x = np.arange(n_models)
         w = 0.8 / n_sc
@@ -2734,6 +2835,7 @@ def comparer_et_sauvegarder(results_avec, results_sans, artifacts_dir, models_di
         # Note visuelle : la barre NN vaut 0 car CV non calculée
         ax.text(n_models - 1, 0.03, "CV\nnon calculée", ha="center", fontsize=7, color="grey")
     plt.tight_layout()
+    fig.text(0.5, 0.005, caption_penalisation, ha="center", fontsize=8, style="italic", color="#555")
     fig.savefig(os.path.join(artifacts_dir, "compare_cv.png"), dpi=120, bbox_inches="tight")
     plt.close(fig)
     print("  Sauvegardé : compare_cv.png")
@@ -2747,7 +2849,7 @@ def comparer_et_sauvegarder(results_avec, results_sans, artifacts_dir, models_di
         ("ram_peak_mb",                  "RAM pic inférence (MB)"),
     ]
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-    fig.suptitle("Ressources — avec pénalisation", fontsize=13, fontweight="bold")
+    fig.suptitle(f"Ressources — {label_avec}", fontsize=13, fontweight="bold")
     for ax, (res_key, res_title) in zip(axes, ressources_cfg):
         x = np.arange(n_models)
         w = 0.8 / n_sc
@@ -2771,6 +2873,7 @@ def comparer_et_sauvegarder(results_avec, results_sans, artifacts_dir, models_di
         ax.legend(fontsize=8)
         ax.grid(axis="y", alpha=0.3)
     plt.tight_layout()
+    fig.text(0.5, 0.005, caption_penalisation, ha="center", fontsize=8, style="italic", color="#555")
     fig.savefig(os.path.join(artifacts_dir, "compare_ressources.png"), dpi=120, bbox_inches="tight")
     plt.close(fig)
     print("  Sauvegardé : compare_ressources.png")
@@ -2788,8 +2891,8 @@ def comparer_et_sauvegarder(results_avec, results_sans, artifacts_dir, models_di
         fig.suptitle(f"Matrices de confusion — {sc_name}", fontsize=13, fontweight="bold")
 
         for config_row, (config_results, config_label) in enumerate([
-            (sc_results_avec, "Avec pénalisation"),
-            (sc_results_sans, "Sans pénalisation"),
+            (sc_results_avec, label_avec),
+            (sc_results_sans, label_sans),
         ]):
             for col, r in enumerate(config_results):
                 ax = axes[config_row][col]
@@ -2815,46 +2918,104 @@ def comparer_et_sauvegarder(results_avec, results_sans, artifacts_dir, models_di
         plt.tight_layout()
         safe = sc_name.replace(" - ", "_").replace(" ", "_")
         fname = f"confusions_{safe}.png"
+        fig.text(0.5, 0.005, caption_penalisation, ha="center", fontsize=8, style="italic", color="#555")
         fig.savefig(os.path.join(artifacts_dir, fname), dpi=120, bbox_inches="tight")
         plt.close(fig)
         print(f"  Sauvegardé : {fname}")
 
     # ==========================================================
-    # FIGURE F — Grille globale (tous scénarios × tous modèles, avec pénalisation)
+    # FIGURE F — Grille globale (tous scénarios × tous modèles), une par config
     # ==========================================================
     # Légende axes : PU = Pas urgent, U = Urgent, TU = Très urgent
+    # On génère la même grille pour la config étudiée ET la baseline (fichiers distincts).
     n_sc_f   = len(scenarios)
     n_mod_f  = n_models
-    fig, axes = plt.subplots(n_sc_f, n_mod_f, figsize=(4 * n_mod_f, 4 * n_sc_f))
-    fig.suptitle(
-        "Matrices de confusion — vue globale (avec pénalisation)\n"
-        "PU = Pas urgent  |  U = Urgent  |  TU = Très urgent",
-        fontsize=12, fontweight="bold",
-    )
-    for row, (sc_name, sc_results) in enumerate(results_avec.items()):
-        for col, r in enumerate(sc_results):
-            ax = axes[row][col]
-            cm = np.array(r["confusion_matrix"])
-            ax.imshow(cm, interpolation="nearest", cmap="Blues", vmin=0, vmax=1)
-            ax.set_xticks([0, 1, 2])
-            ax.set_yticks([0, 1, 2])
-            ax.set_xticklabels(["PU", "U", "TU"], fontsize=7)
-            ax.set_yticklabels(["PU", "U", "TU"], fontsize=7)
-            for i in range(3):
-                for j in range(3):
-                    ax.text(
-                        j, i, f"{cm[i, j]:.2f}",
-                        ha="center", va="center", fontsize=8,
-                        color="white" if cm[i, j] > 0.5 else "black",
-                    )
-            if row == 0:
-                ax.set_title(short_names.get(r["model_name"], r["model_name"]), fontsize=10)
-            if col == 0:
-                ax.set_ylabel(sc_name.split(" - ")[0], fontsize=9)
-    plt.tight_layout()
-    fig.savefig(os.path.join(artifacts_dir, "confusions_global.png"), dpi=120, bbox_inches="tight")
-    plt.close(fig)
-    print("  Sauvegardé : confusions_global.png")
+    grilles_globales = [
+        (results_avec, label_avec, caption_penalisation,    "confusions_global.png"),
+        (results_sans, label_sans, _caption_config(*cfg_sans), "confusions_global_sans.png"),
+    ]
+    for results_grille, label_grille, caption_grille, fname_grille in grilles_globales:
+        fig, axes = plt.subplots(n_sc_f, n_mod_f, figsize=(4 * n_mod_f, 4 * n_sc_f))
+        fig.suptitle(
+            f"Matrices de confusion — vue globale ({label_grille})\n"
+            "PU = Pas urgent  |  U = Urgent  |  TU = Très urgent",
+            fontsize=12, fontweight="bold",
+        )
+        for row, (sc_name, sc_results) in enumerate(results_grille.items()):
+            for col, r in enumerate(sc_results):
+                ax = axes[row][col]
+                cm = np.array(r["confusion_matrix"])
+                ax.imshow(cm, interpolation="nearest", cmap="Blues", vmin=0, vmax=1)
+                ax.set_xticks([0, 1, 2])
+                ax.set_yticks([0, 1, 2])
+                ax.set_xticklabels(["PU", "U", "TU"], fontsize=7)
+                ax.set_yticklabels(["PU", "U", "TU"], fontsize=7)
+                for i in range(3):
+                    for j in range(3):
+                        ax.text(
+                            j, i, f"{cm[i, j]:.2f}",
+                            ha="center", va="center", fontsize=8,
+                            color="white" if cm[i, j] > 0.5 else "black",
+                        )
+                if row == 0:
+                    ax.set_title(short_names.get(r["model_name"], r["model_name"]), fontsize=10)
+                if col == 0:
+                    ax.set_ylabel(sc_name.split(" - ")[0], fontsize=9)
+        plt.tight_layout()
+        fig.text(0.5, 0.005, caption_grille, ha="center", fontsize=8, style="italic", color="#555")
+        fig.savefig(os.path.join(artifacts_dir, fname_grille), dpi=120, bbox_inches="tight")
+        plt.close(fig)
+        print(f"  Sauvegardé : {fname_grille}")
+
+    # ==========================================================
+    # FIGURE G — Tableau récapitulatif des métriques, 1 figure par scénario
+    # ==========================================================
+    # Rendu sous forme de tableau (image) : métriques non-CV + CV par modèle.
+    table_cols = ["Recall cl.2", "Recall cl.1", "Préc. cl.0",
+                  "CV cl.2 (±σ)", "CV préc.0 (±σ)", "Train (s)", "Inf (ms)", "RAM (MB)"]
+    for sc_name, sc_results in results_avec.items():
+        # Une ligne par modèle : libellé + valeurs formatées
+        rows_labels = []
+        cell_text   = []
+        for r in sc_results:
+            rows_labels.append(r["model_name"])
+            # CV : "moyenne ± écart-type", ou N/A (cas du NN, CV non calculée)
+            cv2 = (f"{r['cv_recall2_mean']:.2f} ± {r['cv_recall2_std']:.2f}"
+                   if r["cv_recall2_mean"] is not None else "N/A")
+            cvp0 = (f"{r['cv_precision0_mean']:.2f} ± {r['cv_precision0_std']:.2f}"
+                    if r["cv_precision0_mean"] is not None else "N/A")
+            cell_text.append([
+                f"{r['recall_class2']:.2f}",
+                f"{r['recall_class1']:.2f}",
+                f"{r['precision_class0']:.2f}",
+                cv2,
+                cvp0,
+                f"{r['train_time_s']:.2f}",
+                f"{r['inference_time_ms_per_sample']:.3f}",
+                f"{r['ram_peak_mb']:.2f}",
+            ])
+
+        # Hauteur proportionnelle au nombre de modèles
+        fig, ax = plt.subplots(figsize=(13, 0.6 * len(sc_results) + 2))
+        ax.axis("off")
+        fig.suptitle(f"Métriques par modèle — {sc_name} ({label_avec})", fontsize=13, fontweight="bold")
+        tbl = ax.table(
+            cellText=cell_text, rowLabels=rows_labels, colLabels=table_cols,
+            cellLoc="center", rowLoc="center", loc="center",
+        )
+        tbl.auto_set_font_size(False)
+        tbl.set_fontsize(9)
+        tbl.scale(1, 1.6)
+        # En-tête (ligne 0) en gras sur fond bleu
+        for j in range(len(table_cols)):
+            tbl[0, j].set_facecolor("#1565c0")
+            tbl[0, j].set_text_props(color="white", fontweight="bold")
+        fig.text(0.5, 0.02, caption_penalisation, ha="center", fontsize=8, style="italic", color="#555")
+        safe = sc_name.replace(" - ", "_").replace(" ", "_")
+        fname = f"tableau_metriques_{safe}.png"
+        fig.savefig(os.path.join(artifacts_dir, fname), dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        print(f"  Sauvegardé : {fname}")
 
     # ==========================================================
     # SAUVEGARDE DES MODÈLES (avec pénalisation uniquement)
@@ -2900,19 +3061,22 @@ def comparer_et_sauvegarder(results_avec, results_sans, artifacts_dir, models_di
     for sc_name in scenarios:
         mlflow.set_experiment(sc_name)
 
-        # --- runs avec pénalisation ---
+        # --- runs config étudiée (cfg_avec) ---
         for r in results_avec[sc_name]:
-            with mlflow.start_run(run_name=f"{r['model_name']} — avec pénalisation"):
-                mlflow.log_params({
-                    "scenario":         sc_name,
-                    "model":            r["model_name"],
-                    "penalize":         True,
-                    "class_weight_0":   CLASS_WEIGHT[0],
-                    "class_weight_1":   CLASS_WEIGHT[1],
-                    "class_weight_2":   CLASS_WEIGHT[2],
-                    "threshold_vital":  THRESHOLDS[2],
-                    "threshold_urgent": THRESHOLDS[1],
-                })
+            with mlflow.start_run(run_name=f"{r['model_name']} — {_label_config(*cfg_avec)} — {SCALER_NAME}"):
+                # Paramètres : identité + pénalisation réelle + hyperparamètres du modèle
+                params = {"scenario": sc_name, "model": r["model_name"]}
+                params.update(_penalisation_params(cfg_avec))
+                params.update(_hyperparams(r))
+                # Hyperparamètres TF-IDF : seulement pour les scénarios avec texte (pas S4 clinique)
+                if not sc_name.startswith("S4"):
+                    params["hp_tfidf_max_features"] = TFIDF_MAX_FEATURES
+                    params["hp_tfidf_ngram_range"]  = str(TFIDF_NGRAM_RANGE)
+                    params["hp_tfidf_sublinear_tf"] = TFIDF_SUBLINEAR_TF
+                # Scaler du bloc tabulaire (pas de tabulaire en S3 NLP)
+                if not sc_name.startswith("S3"):
+                    params["hp_scaler"] = SCALER_NAME
+                mlflow.log_params(params)
                 mlflow.log_metrics({
                     "recall_class2":                r["recall_class2"],
                     "recall_class1":                r["recall_class1"],
@@ -2935,14 +3099,20 @@ def comparer_et_sauvegarder(results_avec, results_sans, artifacts_dir, models_di
                     for epoch, v in enumerate(r["history"].get("val_loss", [])):
                         mlflow.log_metric("val_loss", v, step=epoch)
 
-        # --- runs sans pénalisation (baseline) ---
+        # --- runs baseline (cfg_sans) ---
         for r in results_sans[sc_name]:
-            with mlflow.start_run(run_name=f"{r['model_name']} — sans pénalisation"):
-                mlflow.log_params({
-                    "scenario": sc_name,
-                    "model":    r["model_name"],
-                    "penalize": False,
-                })
+            with mlflow.start_run(run_name=f"{r['model_name']} — {_label_config(*cfg_sans)} — {SCALER_NAME}"):
+                # Mêmes paramètres que la config étudiée : identité + pénalisation réelle + hyperparamètres
+                params = {"scenario": sc_name, "model": r["model_name"]}
+                params.update(_penalisation_params(cfg_sans))
+                params.update(_hyperparams(r))
+                if not sc_name.startswith("S4"):
+                    params["hp_tfidf_max_features"] = TFIDF_MAX_FEATURES
+                    params["hp_tfidf_ngram_range"]  = str(TFIDF_NGRAM_RANGE)
+                    params["hp_tfidf_sublinear_tf"] = TFIDF_SUBLINEAR_TF
+                if not sc_name.startswith("S3"):
+                    params["hp_scaler"] = SCALER_NAME
+                mlflow.log_params(params)
                 mlflow.log_metrics({
                     "recall_class2":                r["recall_class2"],
                     "recall_class1":                r["recall_class1"],
@@ -3001,25 +3171,31 @@ if __name__ == "__main__":
         os.path.join(os.path.dirname(__file__), "..", "models")
     )
 
-    # --- Avec pénalisation ---
+    # Configs de pénalisation à comparer, tuples (use_class_weight, use_thresholds).
+    # SOURCE DE VÉRITÉ UNIQUE : modifie ces deux lignes pour tester les 4 modes —
+    # les appels de scénario ET les libellés des figures suivent automatiquement.
+    cfg_avec = (True, False)    # config étudiée (ici : class weight seul)
+    cfg_sans = (False, False)   # baseline argmax
+
+    # --- Config étudiée (cfg_avec) ---
     print("=== S1 - Complet (avec pénalisation) ===")
-    s1_avec = run_scenario_complet(data_path, penalize=True)
+    s1_avec = run_scenario_complet(data_path, use_class_weight=cfg_avec[0], use_thresholds=cfg_avec[1])
     print("\n=== S2 - Ethique (avec pénalisation) ===")
-    s2_avec = run_scenario_ethique(data_path, penalize=True)
+    s2_avec = run_scenario_ethique(data_path, use_class_weight=cfg_avec[0], use_thresholds=cfg_avec[1])
     print("\n=== S3 - NLP (avec pénalisation) ===")
-    s3_avec = run_scenario_nlp(data_path, penalize=True)
+    s3_avec = run_scenario_nlp(data_path, use_class_weight=cfg_avec[0], use_thresholds=cfg_avec[1])
     print("\n=== S4 - Clinique (avec pénalisation) ===")
-    s4_avec = run_scenario_clinique(data_path, penalize=True)
+    s4_avec = run_scenario_clinique(data_path, use_class_weight=cfg_avec[0], use_thresholds=cfg_avec[1])
 
     # --- Sans pénalisation (baseline de comparaison) ---
     print("\n=== S1 - Complet (sans pénalisation) ===")
-    s1_sans = run_scenario_complet(data_path, penalize=False)
+    s1_sans = run_scenario_complet(data_path, use_class_weight=cfg_sans[0], use_thresholds=cfg_sans[1])
     print("\n=== S2 - Ethique (sans pénalisation) ===")
-    s2_sans = run_scenario_ethique(data_path, penalize=False)
+    s2_sans = run_scenario_ethique(data_path, use_class_weight=cfg_sans[0], use_thresholds=cfg_sans[1])
     print("\n=== S3 - NLP (sans pénalisation) ===")
-    s3_sans = run_scenario_nlp(data_path, penalize=False)
+    s3_sans = run_scenario_nlp(data_path, use_class_weight=cfg_sans[0], use_thresholds=cfg_sans[1])
     print("\n=== S4 - Clinique (sans pénalisation) ===")
-    s4_sans = run_scenario_clinique(data_path, penalize=False)
+    s4_sans = run_scenario_clinique(data_path, use_class_weight=cfg_sans[0], use_thresholds=cfg_sans[1])
 
     results_avec = {
         "S1 - Complet":  s1_avec,
@@ -3041,4 +3217,4 @@ if __name__ == "__main__":
 
     # --- Figures + sauvegarde modèles ---
     print("\n=== Génération des figures et sauvegarde ===")
-    comparer_et_sauvegarder(results_avec, results_sans, artifacts_dir, models_dir)
+    comparer_et_sauvegarder(results_avec, results_sans, artifacts_dir, models_dir, cfg_avec, cfg_sans)

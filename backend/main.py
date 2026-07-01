@@ -17,33 +17,24 @@ Instrumentator().instrument(app).expose(app)
 # =============================================================
 _MODELS_DIR = os.path.join(os.path.dirname(__file__), "models")
 
+# Modèle unique déployé en production : RandomForest du scénario 2 (éthique)
+_MODEL_NAME = "RandomForest"
+
 try:
-    preprocessor    = joblib.load(os.path.join(_MODELS_DIR, "S2_preprocessor.pkl"))
-    tfidf           = joblib.load(os.path.join(_MODELS_DIR, "S2_tfidf.pkl"))
+    preprocessor     = joblib.load(os.path.join(_MODELS_DIR, "S2_preprocessor.pkl"))
+    tfidf            = joblib.load(os.path.join(_MODELS_DIR, "S2_tfidf.pkl"))
+    model            = joblib.load(os.path.join(_MODELS_DIR, "S2_RandomForest.pkl"))
     _PIPELINE_LOADED = True
 except FileNotFoundError:
     preprocessor     = None
     tfidf            = None
+    model            = None
     _PIPELINE_LOADED = False
-
-# Charger tous les modèles S2 disponibles dans un dictionnaire
-# Les fichiers utilitaires (preprocessor, tfidf) sont exclus
-_UTILITY_FILES = {"preprocessor", "tfidf"}
-_MODELS = {}
-if os.path.isdir(_MODELS_DIR):
-    for _fname in os.listdir(_MODELS_DIR):
-        if _fname.startswith("S2_") and _fname.endswith(".pkl"):
-            _name = _fname[len("S2_"):-len(".pkl")]
-            if _name not in _UTILITY_FILES:
-                try:
-                    _MODELS[_name] = joblib.load(os.path.join(_MODELS_DIR, _fname))
-                except Exception as e:
-                    print(f"[WARNING] Impossible de charger {_fname} : {e}")
 
 # =============================================================
 # CONSTANTES DE PÉNALISATION (identiques à l'entraînement)
 # =============================================================
-_THRESHOLDS = {2: 0.15, 1: 0.20}
+_THRESHOLDS = {2: 0.20, 1: 0.30}
 _AGE_BINS   = [0, 17, 40, 64, float("inf")]
 _AGE_LABELS = ["enfant", "adulte_jeune", "adulte", "senior"]
 _NUM_ETH    = ["freq_cardiaque", "tension_sys", "temp", "sat_oxygene", "antecedents", "duree_symptomes"]
@@ -85,7 +76,6 @@ class PatientInput(BaseModel):
     duree_symptomes:       float
     source:                str
     description_symptomes: str
-    model_name:            str = "RandomForest"  # modèle sélectionné par l'utilisateur
 
     @field_validator("age")
     @classmethod
@@ -129,16 +119,10 @@ class PatientInput(BaseModel):
 @app.get("/health")
 def health():
     return {
-        "status":           "ok",
-        "pipeline_loaded":  _PIPELINE_LOADED,
-        "models_available": sorted(_MODELS.keys()),
+        "status":          "ok",
+        "pipeline_loaded": _PIPELINE_LOADED,
+        "model":           _MODEL_NAME,
     }
-
-
-@app.get("/models")
-def list_models():
-    """Retourne la liste des modèles S2 disponibles."""
-    return {"models": sorted(_MODELS.keys()), "default": "RandomForest"}
 
 
 @app.post("/predict")
@@ -148,13 +132,6 @@ def predict(patient: PatientInput):
             status_code=503,
             detail="Pipeline non chargé — lancez d'abord le script d'entraînement pour générer les fichiers pkl.",
         )
-    if patient.model_name not in _MODELS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Modèle '{patient.model_name}' non disponible. Modèles disponibles : {sorted(_MODELS.keys())}",
-        )
-
-    model = _MODELS[patient.model_name]
 
     # 1. Construire un DataFrame avec les champs bruts
     df = pd.DataFrame([patient.model_dump()])
@@ -217,7 +194,7 @@ def predict(patient: PatientInput):
         "prediction":   prediction,
         "label":        _LABELS[prediction],
         "probabilites": probas_dict,
-        "model_name":   patient.model_name,
+        "model_name":   _MODEL_NAME,
         "timestamp":    datetime.now().isoformat(timespec="seconds"),
     }
 

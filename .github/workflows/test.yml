@@ -1,13 +1,15 @@
-name: Tests unitaires
+name: Tests (unitaires + fonctionnels)
 
+# Se déclenche sur la branche main : à chaque merge d'une branche sur main,
+# et sur les pull requests ciblant main (avant fusion).
 on:
   push:
-    branches: [main, production]
+    branches: [main]
   pull_request:
-    branches: [main, production]
+    branches: [main]
 
 jobs:
-  tests-unitaires:
+  tests:
     runs-on: ubuntu-latest
 
     steps:
@@ -23,7 +25,9 @@ jobs:
       - name: Installer les dépendances
         run: pip install -r backend/requirements.txt
 
-      - name: Lancer les tests unitaires
-        run: pytest backend/tests/test_unitaire.py -v
+      # Suite complète : les tests fonctionnels tournent en mémoire (TestClient FastAPI),
+      # sans serveur. Ils ont besoin du modèle S2, désormais présent dans le dépôt.
+      - name: Lancer les tests (unitaires + fonctionnels)
+        run: pytest backend/tests/ -v
         env:
           PYTHONPATH: backend

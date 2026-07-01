@@ -1,6 +1,11 @@
 ﻿.backvenv
 mlruns
-models
+# On exclut tout le dossier models/ SAUF les 3 fichiers du modèle de production,
+# pour qu'ils soient bakés dans l'image (déployable sans volume) sans embarquer les 339 Mo.
+models/*
+!models/S2_RandomForest.pkl
+!models/S2_preprocessor.pkl
+!models/S2_tfidf.pkl
 __pycache__
 *.pyc
 *.ipynb

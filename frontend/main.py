@@ -14,28 +14,10 @@ st.set_page_config(
 st.title("Système de tri d'urgence — Télémédecine")
 
 # =============================================================
-# SÉLECTION DU MODÈLE
+# MODÈLE
 # =============================================================
-# Récupère la liste des modèles disponibles depuis le backend
-try:
-    _models_resp    = requests.get(f"{BACKEND_URL}/models", timeout=5)
-    _models_data    = _models_resp.json()
-    available_models = _models_data["models"]
-    default_model    = _models_data["default"]
-except Exception:
-    available_models = ["RandomForest"]
-    default_model    = "RandomForest"
-
-default_index = available_models.index(default_model) if default_model in available_models else 0
-
-model_name = st.selectbox(
-    "Modèle de prédiction",
-    options=available_models,
-    index=default_index,
-    help="Tous les modèles utilisent le scénario S2 (éthique, sans sexe ni zone_vie)",
-)
-
-st.caption(f"Scénario S2 — modèle sélectionné : **{model_name}**")
+# Un seul modèle déployé en production : RandomForest du scénario 2 (éthique)
+st.caption("Scénario S2 (éthique, sans sexe ni zone_vie) — modèle : **RandomForest**")
 
 # =============================================================
 # FORMULAIRE PATIENT
@@ -123,7 +105,6 @@ if st.button("Prédire le niveau d'urgence", type="primary", use_container_width
             "duree_symptomes":       duree_symptomes,
             "source":                source,
             "description_symptomes": description_symptomes,
-            "model_name":            model_name,
         }
 
         try:

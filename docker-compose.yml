@@ -1,16 +1,18 @@
 services:
   backend:
     build: ./backend
+    # Image publiée sur Docker Hub — le modèle S2 est baké dans l'image au build.
+    # DOCKERHUB_USERNAME vient du secret en CI ; sinon fallback sur le placeholder à remplacer.
+    image: ${DOCKERHUB_USERNAME:-hadnotb}/telemedic-backend:latest
     ports:
       - "8000:8000"
     volumes:
-      # Les modèles pkl sont générés en local et montés dans le conteneur
-      - ./backend/models:/app/models
       # Le CSV d'historique persiste entre les redémarrages
       - ./backend/predictions_history.csv:/app/predictions_history.csv
 
   frontend:
     build: ./frontend
+    image: ${DOCKERHUB_USERNAME:-hadnotb}/telemedic-frontend:latest
     ports:
       - "8501:8501"
     environment:
