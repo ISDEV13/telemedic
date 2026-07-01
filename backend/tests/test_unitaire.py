@@ -15,7 +15,7 @@ from main import PatientInput
 
 # Payload valide de base — on le réutilise dans tous les tests en le modifiant
 _BASE = dict(
-    age=-9,
+    age=45,
     freq_cardiaque=80,
     tension_sys=120,
     temp=37.0,
