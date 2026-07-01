@@ -30,7 +30,6 @@ _BASE = dict(
     duree_symptomes=2.0,
     source="appel",
     description_symptomes="maux de tête légers",
-    model_name="RandomForest",
 )
 
 # Patient avec constantes critiques — valeurs proches des moyennes classe 2 du dataset
@@ -45,7 +44,6 @@ _PATIENT_CRITIQUE = dict(
     duree_symptomes=1.0,
     source="appel",
     description_symptomes="détresse respiratoire sévère, douleur thoracique, confusion",
-    model_name="RandomForest",
 )
 
 
@@ -61,17 +59,9 @@ def test_health_contient_status_ok():
     response = client.get("/health")
     assert response.json()["status"] == "ok"
 
-def test_models_retourne_200():
-    response = client.get("/models")
-    assert response.status_code == 200
-
-def test_models_liste_non_vide():
-    response = client.get("/models")
-    assert len(response.json()["models"]) > 0
-
-def test_models_contient_random_forest():
-    response = client.get("/models")
-    assert "RandomForest" in response.json()["models"]
+def test_health_expose_le_modele():
+    response = client.get("/health")
+    assert response.json()["model"] == "RandomForest"
 
 
 # =============================================================
@@ -114,11 +104,6 @@ def test_predict_model_name_retourne_dans_reponse():
 # =============================================================
 # GESTION DES ERREURS
 # =============================================================
-
-def test_predict_modele_inexistant_retourne_400():
-    payload = {**_BASE, "model_name": "ModeleInvente"}
-    response = client.post("/predict", json=payload)
-    assert response.status_code == 400
 
 def test_predict_age_invalide_retourne_422():
     payload = {**_BASE, "age": -1}

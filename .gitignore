@@ -4,7 +4,12 @@ CLAUDE.md
 .backvenv
 backend/.backvenv/
 __pycache__
-backend/models
+# On ignore tout le dossier models/ SAUF les 3 fichiers du modèle de production
+# (nécessaires pour que la CI bake le modèle dans l'image)
+backend/models/*
+!backend/models/S2_RandomForest.pkl
+!backend/models/S2_preprocessor.pkl
+!backend/models/S2_tfidf.pkl
 backend/mlflow.db
 backend/mlruns
 backend/predictions_history.csv
