@@ -1,12 +1,12 @@
 name: Tests (unitaires + fonctionnels)
 
-# Se déclenche sur la branche main : à chaque merge d'une branche sur main,
-# et sur les pull requests ciblant main (avant fusion).
+# Se déclenche sur les pull requests vers main ET production.
+# → fournit le "check" tests utilisé par la protection de branche pour bloquer le merge.
 on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    branches: [main, production]
 
 jobs:
   tests:
