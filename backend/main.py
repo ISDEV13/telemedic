@@ -51,7 +51,7 @@ if os.path.isdir(_MODELS_DIR):
 # =============================================================
 # CONSTANTES DE PÉNALISATION (identiques à l'entraînement)
 # =============================================================
-_THRESHOLDS = {2: 0.30, 1: 0.40}
+_THRESHOLDS = {2: 0.20, 1: 0.30}
 _AGE_BINS   = [0, 17, 40, 64, float("inf")]
 _AGE_LABELS = ["enfant", "adulte_jeune", "adulte", "senior"]
 _NUM_ETH    = ["freq_cardiaque", "tension_sys", "temp", "sat_oxygene", "antecedents", "duree_symptomes"]
