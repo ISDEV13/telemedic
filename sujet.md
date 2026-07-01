@@ -165,8 +165,6 @@ L’application sera composée de :
 - Mise en place d’une chaîne CI/CD complète avec **GitHub Actions**
 - Automatisation :
   - Tests
-  - Linting
-  - Entraînement du modèle
   - Déploiement
 - À chaque mise à jour de la branche principale :
   - Construction automatique d’une image Docker
